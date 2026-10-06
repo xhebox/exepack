@@ -1,0 +1,25 @@
+[package]
+name = "exepack"
+version = "0.2.0"
+edition = "2024"
+description = "Embed items into an executable: gzip them into the image's own container, one per item."
+license = "MIT"
+repository = "https://github.com/xhebox/exepack"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+flate2 = "1.1"
+strum = { version = "0.27", features = ["derive"] }
+libsui = "0.16.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+editpe = "0.2.4"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+# A `pub` item must be reachable from the crate root.
+unreachable_pub = "deny"
