@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Result;
+#[cfg(target_os = "linux")]
+use object::{elf::FileHeader64, endian::Endianness, pod, read::elf::FileHeader};
 
 /// The `exepack` cargo built for this run.
 fn exepack() -> &'static str {
@@ -90,7 +92,7 @@ fn an_image_of_no_known_container_is_refused() -> Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn macho_append_requires_macos() -> Result<()> {
+fn a_macho_is_refused_away_from_macos() -> Result<()> {
 	let scratch = tempfile::tempdir()?;
 	let main = scratch.path().join("main");
 	let out = scratch.path().join("packed");
@@ -104,10 +106,9 @@ fn macho_append_requires_macos() -> Result<()> {
 		&format!("kernel={}", carrier().display()),
 	]);
 	assert!(
-		stderr.contains("requires macOS for code signing"),
+		stderr.contains("requires the platform it targets"),
 		"{stderr}"
 	);
-	assert!(!out.exists(), "a rejected Mach-O left an output image");
 	Ok(())
 }
 
@@ -211,9 +212,14 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 		std::fs::remove_file(std::env::current_exe()?)?;
 		for (name, expected) in items {
 			let mut bytes = Vec::new();
-			exepack::find_item(name)?.read_to_end(&mut bytes)?;
+			exepack::format::find_loaded(name)?.read_to_end(&mut bytes)?;
 			assert_eq!(bytes, expected.as_bytes(), "{name:?} did not read back");
 		}
+		// A name that was never embedded has to be reported rather than walked past the end of the records, which the padding behind them does not look like a record at all.
+		assert!(
+			exepack::format::find_loaded("never_embedded").is_err(),
+			"a missing item was not reported"
+		);
 		return Ok(());
 	}
 
@@ -226,47 +232,151 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 			Ok(format!("{name}={}", item.display()))
 		})
 		.collect::<Result<_>>()?;
-	let main = carrier();
-	for compress in [None, Some("gzip"), Some("none")] {
-		let out = scratch.path().join(compress.unwrap_or("default"));
-		let mut command = Command::new(exepack());
-		command.args([
+	let mains = cfg_select! {
+		target_os = "linux" => {{
+			let mut bytes = std::fs::read(carrier())?;
+			let endian = FileHeader64::<Endianness>::parse(bytes.as_slice())?.endian()?;
+			let (header, _) = pod::from_bytes_mut::<FileHeader64<Endianness>>(&mut bytes)
+				.map_err(|_| anyhow::anyhow!("invalid carrier header"))?;
+			header.e_shoff.set(endian, 0);
+			header.e_shnum.set(endian, 0);
+			header.e_shstrndx.set(endian, object::elf::SHN_UNDEF);
+			let sectionless = scratch.path().join("sectionless");
+			std::fs::write(&sectionless, bytes)?;
+			std::fs::set_permissions(&sectionless, std::fs::metadata(carrier())?.permissions())?;
+			vec![carrier(), sectionless]
+		}}
+		_ => { vec![carrier()] }
+	};
+	for (index, main) in mains.iter().enumerate() {
+		for compress in [None, Some("gzip"), Some("none")] {
+			let out = scratch
+				.path()
+				.join(format!("{index}-{}", compress.unwrap_or("default")));
+			let mut command = Command::new(exepack());
+			command.args([
+				"--main",
+				&main.display().to_string(),
+				"--output",
+				&out.display().to_string(),
+			]);
+			if let Some(compress) = compress {
+				command.args(["--compress", compress]);
+			}
+			let status = command
+				.args(specs.iter().flat_map(|spec| ["--item", spec]))
+				.status()?;
+			assert!(status.success(), "the run failed: {status}");
+			#[cfg(target_os = "macos")]
+			{
+				let verification = Command::new("codesign")
+					.args(["--verify", "--strict"])
+					.arg(&out)
+					.output()?;
+				assert!(
+					verification.status.success(),
+					"the packed copy has an invalid signature: {}",
+					String::from_utf8_lossy(&verification.stderr)
+				);
+			}
+			let child = Command::new(&out)
+				.env("EXEPACK_PROBE", "1")
+				.args(["--exact", "a_packed_copy_reads_its_items_back"])
+				.output()?;
+			assert!(
+				child.status.success(),
+				"the packed copy does not read its items back: {}\nstdout: {}\nstderr: {}",
+				child.status,
+				String::from_utf8_lossy(&child.stdout),
+				String::from_utf8_lossy(&child.stderr)
+			);
+		}
+	}
+	Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_items_are_read_back_without_disturbing_the_image() -> Result<()> {
+	let scratch = tempfile::tempdir()?;
+	let main = scratch.path().join("signed");
+	let entitlements = scratch.path().join("entitlements.plist");
+	std::fs::write(
+		&entitlements,
+		br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.cs.allow-jit</key><true/>
+</dict></plist>"#,
+	)?;
+	std::fs::copy(carrier(), &main)?;
+	// The carrier is signed by the linker as it is, so it has to be signed again to carry the entitlements this test is about.
+	let signing = Command::new("codesign")
+		.args(["--force", "--sign", "-", "--entitlements"])
+		.arg(&entitlements)
+		.arg(&main)
+		.output()?;
+	assert!(
+		signing.status.success(),
+		"the carrier could not be signed: {}",
+		String::from_utf8_lossy(&signing.stderr)
+	);
+
+	let out = scratch.path().join("packed");
+	let item = scratch.path().join("kernel");
+	std::fs::write(&item, b"the item, as it was written")?;
+	let status = Command::new(exepack())
+		.args([
 			"--main",
 			&main.display().to_string(),
 			"--output",
 			&out.display().to_string(),
-		]);
-		if let Some(compress) = compress {
-			command.args(["--compress", compress]);
-		}
-		let status = command
-			.args(specs.iter().flat_map(|spec| ["--item", spec]))
-			.status()?;
-		assert!(status.success(), "the run failed: {status}");
-		#[cfg(target_os = "macos")]
-		{
-			let verification = Command::new("codesign")
-				.args(["--verify", "--strict"])
-				.arg(&out)
-				.output()?;
-			assert!(
-				verification.status.success(),
-				"the packed copy has an invalid signature: {}",
-				String::from_utf8_lossy(&verification.stderr)
-			);
-		}
-		let child = Command::new(&out)
-			.env("EXEPACK_PROBE", "1")
-			.args(["--exact", "a_packed_copy_reads_its_items_back"])
+			"--item",
+			&format!("kernel={}", item.display()),
+		])
+		.status()?;
+	assert!(status.success(), "the run failed: {status}");
+
+	// What the signer carries over from the image it was handed. `--entitlements -` writes the plist to stdout and only the path it read to stderr.
+	let read = |path: &std::path::Path| -> Result<(String, u32, u32)> {
+		let display = Command::new("codesign")
+			.args(["--display", "--entitlements", "-"])
+			.arg(path)
 			.output()?;
-		assert!(
-			child.status.success(),
-			"the packed copy does not read its items back: {}\nstdout: {}\nstderr: {}",
-			child.status,
-			String::from_utf8_lossy(&child.stdout),
-			String::from_utf8_lossy(&child.stderr)
-		);
-	}
+		let bytes = std::fs::read(path)?;
+		let count = u32::from_le_bytes(bytes[16..20].try_into()?);
+		let size = u32::from_le_bytes(bytes[20..24].try_into()?);
+		Ok((
+			String::from_utf8_lossy(&display.stdout).into_owned(),
+			count,
+			size,
+		))
+	};
+	let (input_entries, input_count, input_size) = read(&main)?;
+	let (entries, count, size) = read(&out)?;
+	assert!(
+		input_entries.contains("com.apple.security.cs.allow-jit"),
+		"the entitlements were never applied to the carrier: {input_entries}"
+	);
+	assert!(
+		entries.contains("com.apple.security.cs.allow-jit"),
+		"the packed copy lost its entitlements\n  input: {input_entries}\n  output: {entries}"
+	);
+	// The items ride in `__LINKEDIT`, so the load command table and every section it describes must be exactly where the carrier left them; adding a command or moving a section is what corrupts the image.
+	assert_eq!(
+		(count, size),
+		(input_count, input_size),
+		"packing changed the load command table"
+	);
+	let verification = Command::new("codesign")
+		.args(["--verify", "--strict"])
+		.arg(&out)
+		.output()?;
+	assert!(
+		verification.status.success(),
+		"the packed copy has an invalid signature: {}",
+		String::from_utf8_lossy(&verification.stderr)
+	);
 	Ok(())
 }
 

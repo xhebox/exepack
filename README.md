@@ -1,6 +1,8 @@
 # exepack
 
-Embed items into a single executable with compression, based on [libsui](https://github.com/denoland/sui) and [editpe](https://github.com/Systemcluster/editpe).
+Embed items into a single executable with compression.
+
+ELF and Mach-O inspired by [libsui](https://github.com/denoland/sui), PE based on [editpe](https://github.com/Systemcluster/editpe).
 
 ## Usage
 
@@ -23,12 +25,12 @@ The output copies the permissions of `--main`, setuid and setgid included.
 ## Reading items back
 
 ```rust
-let mut kernel = exepack::find_item("test_item")?;
+let mut kernel = exepack::format::find_loaded("test_item")?;
 let mut bytes = Vec::new();
 kernel.read_to_end(&mut bytes)?;
 ```
 
-`find_item` returns `anyhow::Result`; a missing item is reported as an error naming the requested item.
+`format::find_loaded` returns `anyhow::Result`; a missing item is reported as an error naming the requested item.
 
 ## License
 

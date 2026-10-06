@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -31,6 +31,9 @@ fn main() -> Result<()> {
 		let (name, path) = spec
 			.split_once('=')
 			.with_context(|| format!("--item {spec:?} is not NAME=PATH"))?;
+		if name.is_empty() {
+			bail!("item name cannot be empty");
+		}
 		if named.iter().any(|(seen, _)| seen.as_str() == name) {
 			bail!("item name {name:?} is embedded twice");
 		}
@@ -62,12 +65,11 @@ fn main() -> Result<()> {
 		.context("read the main executable")?;
 	let container = Container::detect(&bytes)?;
 
-	let packed = container
-		.append(&bytes, items, args.compress)
-		.with_context(|| format!("embed items in {}", args.main.display()))?;
 	let mut out = std::fs::File::create(&args.output)
 		.with_context(|| format!("create {}", args.output.display()))?;
-	out.write_all(&packed)?;
+	container
+		.append(&bytes, items, args.compress, &mut out)
+		.with_context(|| format!("embed items in {}", args.main.display()))?;
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;

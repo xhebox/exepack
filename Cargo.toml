@@ -1,6 +1,6 @@
 [package]
 name = "exepack"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Embed items into an executable: gzip them into the image's own container, one per item."
 license = "MIT"
@@ -11,14 +11,21 @@ anyhow = "1"
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"
 strum = { version = "0.27", features = ["derive"] }
-libsui = "0.16.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arwen-codesign = "0.0.1-alpha.1"
+object = { version = "0.40", default-features = false, features = ["read_core", "macho", "std"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 editpe = "0.2.4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [lints.rust]
 # A `pub` item must be reachable from the crate root.
