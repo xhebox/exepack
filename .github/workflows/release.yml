@@ -46,26 +46,25 @@ jobs:
           rustflags: ""
           cache-shared-key: cargo-${{ runner.os }}-${{ runner.arch }}
 
-      # Usually pulls what the pull request pushed; a fork's pull request could not push, so this builds it.
+      # Usually pulls what the pull request pushed; a fork's pull request could not push, so this builds and pushes it.
       - name: Dist
         run: task dist TARGET=${{ matrix.target }} PUSH=1
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: exepack-${{ matrix.target }}
-          path: dist/exepack-${{ matrix.target }}.tar.gz
-          if-no-files-found: error
 
   release:
     needs: dist
     runs-on: ubuntu-26.04
     permissions:
       contents: write
+      packages: read
     steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: dist
-          merge-multiple: true
+      - uses: actions/checkout@v7
+
+      - name: Set up task and oras
+        uses: ./.github/actions/setup-task-oras
+
+      # Every target is in the registry now; this only pulls.
+      - name: Dist
+        run: task dists PUSH=0
 
       - name: Publish
         uses: softprops/action-gh-release@v3

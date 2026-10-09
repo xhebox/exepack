@@ -65,3 +65,10 @@ tasks:
         cargo build --release --locked --target {{.TARGET}}
         tar -czf '{{.TARBALL}}' -C '../target/{{.TARGET}}/release' 'exepack{{if contains "windows" .TARGET}}.exe{{end}}'
         {{if eq .PUSH "1"}}oras push '{{.OCI_REPOSITORY}}:{{.TARGET}}-{{.CHECKSUM}}' '{{.TARBALL}}:application/gzip'{{end}}
+
+  dists:
+    desc: "Fetch or build the release tarball of every target in TARGETS from OCI_REPOSITORY"
+    cmds:
+      - for: { var: TARGETS }
+        task: dist
+        vars: { TARGET: '{{.ITEM}}' }
