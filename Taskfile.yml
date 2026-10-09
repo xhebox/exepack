@@ -32,9 +32,9 @@ tasks:
       - cargo nextest run --locked {{.CLI_ARGS}}
 
   # Pull the target's tarball from OCI_REPOSITORY, tagged with the sources' checksum; failing that, build it and
-  # push it with PUSH=1, or fail with BUILD=0. oras pulls a layer under the name it was pushed as, so both run in dist.
+  # push it with PUSH=1. oras pulls a layer under the name it was pushed as, so both run in dist.
   dist:
-    desc: "Fetch or build the release tarball for TARGET from OCI_REPOSITORY (BUILD=0 never builds, PUSH=1 publishes a fresh build)"
+    desc: "Fetch or build the release tarball for TARGET from OCI_REPOSITORY (PUSH=1 publishes a fresh build)"
     # The label keeps each target's checksum apart.
     label: 'dist-{{.TARGET}}'
     silent: true
@@ -42,8 +42,6 @@ tasks:
       vars:
         - TARGET
         - OCI_REPOSITORY
-        - name: BUILD
-          enum: ['0', '1']
         - name: PUSH
           enum: ['0', '1']
     vars:
@@ -64,14 +62,6 @@ tasks:
         mkdir -p dist
         cd dist
         oras pull '{{.OCI_REPOSITORY}}:{{.TARGET}}-{{.CHECKSUM}}' && exit
-        {{if eq .BUILD "0"}}exit 1{{end}}
         cargo build --release --locked --target {{.TARGET}}
         tar -czf '{{.TARBALL}}' -C '../target/{{.TARGET}}/release' 'exepack{{if contains "windows" .TARGET}}.exe{{end}}'
         {{if eq .PUSH "1"}}oras push '{{.OCI_REPOSITORY}}:{{.TARGET}}-{{.CHECKSUM}}' '{{.TARBALL}}:application/gzip'{{end}}
-
-  dists:
-    desc: "Fetch or build the release tarball of every target in TARGETS from OCI_REPOSITORY"
-    cmds:
-      - for: { var: TARGETS }
-        task: dist
-        vars: { TARGET: '{{.ITEM}}' }

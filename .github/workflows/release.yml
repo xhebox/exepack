@@ -12,20 +12,58 @@ env:
   OCI_REPOSITORY: ghcr.io/${{ github.repository }}
 
 jobs:
-  release:
-    runs-on: ubuntu-26.04
+  dist:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
     permissions:
-      contents: write
-      packages: read
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - runs-on: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+          - runs-on: macos-26
+            target: aarch64-apple-darwin
+          - runs-on: windows-2025
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up task and oras
         uses: ./.github/actions/setup-task-oras
 
-      # Fetch what the pull request built and pushed; never build here.
+      - name: Install rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+          # Leave RUSTFLAGS unset; it would override the rustflags in .cargo/config.toml.
+          rustflags: ""
+          cache-shared-key: cargo-${{ runner.os }}-${{ runner.arch }}
+
+      # Usually pulls what the pull request pushed; a fork's pull request could not push, so this builds it.
       - name: Dist
-        run: task dists BUILD=0 PUSH=0
+        run: task dist TARGET=${{ matrix.target }} PUSH=1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: exepack-${{ matrix.target }}
+          path: dist/exepack-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: dist
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish
         uses: softprops/action-gh-release@v3

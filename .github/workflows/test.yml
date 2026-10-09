@@ -50,5 +50,6 @@ jobs:
         run: task test -- --target ${{ matrix.target }}
 
       # Build and publish the release tarball here, so the release fetches it rather than building after the merge.
+      # A fork's token cannot push; the release builds what it does not find.
       - name: Dist
-        run: task dist TARGET=${{ matrix.target }} BUILD=1 PUSH=${{ github.event.pull_request.head.repo.fork && '0' || '1' }}
+        run: task dist TARGET=${{ matrix.target }} PUSH=${{ github.event.pull_request.head.repo.fork && '0' || '1' }}
