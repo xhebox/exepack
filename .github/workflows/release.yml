@@ -7,66 +7,25 @@ on:
 permissions:
   contents: read
 
+env:
+  # Where task dist keeps release tarballs; OCI wants it lowercase, as this repository's name is.
+  OCI_REPOSITORY: ghcr.io/${{ github.repository }}
+
 jobs:
-  build:
-    name: ${{ matrix.target }}
-    runs-on: ${{ matrix.runs-on }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runs-on: ubuntu-26.04
-            target: x86_64-unknown-linux-musl
-            bin: exepack
-          - runs-on: ubuntu-26.04-arm
-            target: aarch64-unknown-linux-musl
-            bin: exepack
-          - runs-on: macos-26
-            target: aarch64-apple-darwin
-            bin: exepack
-          - runs-on: windows-2025
-            target: x86_64-pc-windows-msvc
-            bin: exepack.exe
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install task
-        uses: arduino/setup-task@v3
-        with:
-          repo-token: ${{ github.token }}
-
-      - name: Install rust
-        uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          target: ${{ matrix.target }}
-          # Leave RUSTFLAGS unset; it would override the rustflags in .cargo/config.toml.
-          rustflags: ""
-          cache-shared-key: cargo-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Build
-        run: task build -- --release --target ${{ matrix.target }}
-
-      - name: Package
-        run: |
-          mkdir -p dist
-          tar -czf "dist/exepack-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" "${{ matrix.bin }}"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: exepack-${{ matrix.target }}
-          path: dist/exepack-${{ matrix.target }}.tar.gz
-          if-no-files-found: error
-
   release:
-    needs: build
     runs-on: ubuntu-26.04
     permissions:
       contents: write
+      packages: read
     steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: dist
-          merge-multiple: true
+      - uses: actions/checkout@v7
+
+      - name: Set up task and oras
+        uses: ./.github/actions/setup-task-oras
+
+      # Fetch what the pull request built and pushed; never build here.
+      - name: Dist
+        run: task dists BUILD=0 PUSH=0
 
       - name: Publish
         uses: softprops/action-gh-release@v3
