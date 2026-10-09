@@ -25,7 +25,7 @@ struct Cli {
 fn main() -> Result<()> {
 	let args = Cli::parse();
 
-	// The names are settled before anything is read: a typo in the caller's list is worth saying before a few hundred megabytes are read.
+	// Check every name before reading any item.
 	let mut named: Vec<(String, PathBuf)> = Vec::with_capacity(args.items.len());
 	for spec in &args.items {
 		let (name, path) = spec

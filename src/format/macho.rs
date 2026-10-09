@@ -30,20 +30,22 @@ const IDENTIFIER: &str = "a.out";
 // The payload and the signature behind it both start on this boundary.
 const ALIGN: usize = 16;
 
-// A record is a name length, a data length and then the two of them.
+// A record's header: a u16 name length and a u64 data length.
 const RECORD_LEN: usize = 2 + 8;
 
 /// Append the items to the image.
 ///
 /// Each item is one record of its own, named in the record rather than by a load command, because a Mach-O section name is 16 bytes at most and every added load command would move the sections behind it.
-///
-/// `items` is called once per item with the buffer to write into, which is cleared before each call and reused, so only one item's bytes are held beyond the data already laid out.
 pub(super) fn append(
 	image: &[u8],
-	mut items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+	items: impl FnMut(&mut Vec<u8>) -> Result<String>,
 	output: &mut impl Write,
 ) -> Result<()> {
-	let header = header(image)?;
+	let header = MachHeader64::<LittleEndian>::parse(image, 0)?;
+	ensure!(
+		header.is_little_endian(),
+		"the image is not a 64-bit little-endian Mach-O"
+	);
 	let mut signature = None;
 	for command in header.load_commands(LittleEndian, image, 0)? {
 		let command = command?;
@@ -55,43 +57,50 @@ pub(super) fn append(
 	}
 	let signature = signature
 		.context("the image carries no code signature to move behind the items; sign it first")?;
-	// Read before the signature is moved: once `dataoff` points past the items, the blob the image arrived with is no longer where a signer would look for it.
+	// Read before `dataoff` moves off the original signature.
 	let entitlements = arwen_codesign::extract_entitlements(image);
 
 	let mut built = image.to_vec();
 	built.resize(built.len().next_multiple_of(ALIGN), 0);
 	built.extend_from_slice(MARKER);
-	let mut buffer = Vec::new();
-	loop {
-		buffer.clear();
-		let name = items(&mut buffer)?;
-		if name.is_empty() {
-			break;
-		}
-		let name_len = u16::try_from(name.len()).context("an item name is too long")?;
-		built.extend_from_slice(&name_len.to_le_bytes());
-		built.extend_from_slice(&u64::try_from(buffer.len())?.to_le_bytes());
-		built.extend_from_slice(name.as_bytes());
-		built.extend_from_slice(&buffer);
-	}
-	drop(buffer);
+	write_records(&mut built, items)?;
 	built.resize(built.len().next_multiple_of(ALIGN), 0);
-	// The signature goes where `__LINKEDIT` can grow to reach it, so the payload ends up covered by the segment.
+	// Point the signature past the payload; signing grows `__LINKEDIT` up to it.
 	let dataoff = u32::try_from(built.len())?;
 	let (command, _) =
 		object::pod::from_bytes_mut::<LinkeditDataCommand<LittleEndian>>(&mut built[signature..])
 			.map_err(|_| anyhow::anyhow!("invalid Mach-O code signature command"))?;
 	command.dataoff.set(LittleEndian, dataoff);
 
-	// Signing uses the entitlements read from the image the caller supplied, and grows `__LINKEDIT` over the payload.
+	// Sign with the entitlements the input image carried.
 	let options = arwen_codesign::AdhocSignOptions::new(IDENTIFIER).with_entitlements(
-		match entitlements.as_deref() {
-			Some(data) => arwen_codesign::Entitlements::Custom(data),
-			None => arwen_codesign::Entitlements::None,
-		},
+		entitlements.as_deref().map_or(
+			arwen_codesign::Entitlements::None,
+			arwen_codesign::Entitlements::Custom,
+		),
 	);
 	let signed = arwen_codesign::adhoc_sign(built, &options).context("sign Mach-O")?;
 	output.write_all(&signed).context("write Mach-O")
+}
+
+/// Append each item as a record: name length, data length, name, data.
+fn write_records(
+	built: &mut Vec<u8>,
+	mut items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+) -> Result<()> {
+	let mut data = Vec::new();
+	loop {
+		data.clear();
+		let name = items(&mut data)?;
+		if name.is_empty() {
+			return Ok(());
+		}
+		let name_len = u16::try_from(name.len()).context("an item name is too long")?;
+		built.extend_from_slice(&name_len.to_le_bytes());
+		built.extend_from_slice(&u64::try_from(data.len())?.to_le_bytes());
+		built.extend_from_slice(name.as_bytes());
+		built.extend_from_slice(&data);
+	}
 }
 
 /// The bytes stored under `name` in the running image.
@@ -110,11 +119,8 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 			"the running image is not a 64-bit little-endian Mach-O",
 		));
 	}
-	// SAFETY: the checked magic identifies a mapped 64-bit Mach-O header.
-	let bytes =
-		unsafe { std::slice::from_raw_parts(pointer, size_of::<MachHeader64<LittleEndian>>()) };
-	let header = MachHeader64::<LittleEndian>::parse(bytes, 0)
-		.or_invalid("the running image's Mach-O header is malformed")?;
+	// SAFETY: the checked magic identifies a mapped 64-bit Mach-O header, and dyld maps it page-aligned.
+	let header = unsafe { &*pointer.cast::<MachHeader64<LittleEndian>>() };
 	let sizeofcmds = header.sizeofcmds.get(LittleEndian) as usize;
 	// SAFETY: the image maps its header and `sizeofcmds` bytes of load commands as one contiguous range.
 	let bytes = unsafe {
@@ -191,13 +197,4 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 unsafe extern "C" {
 	fn _dyld_get_image_header(image_index: u32) -> *const u8;
 	fn _dyld_get_image_vmaddr_slide(image_index: u32) -> isize;
-}
-
-fn header(data: &[u8]) -> Result<&MachHeader64<LittleEndian>> {
-	let header = MachHeader64::<LittleEndian>::parse(data, 0)?;
-	ensure!(
-		header.is_little_endian(),
-		"the image is not a 64-bit little-endian Mach-O"
-	);
-	Ok(header)
 }

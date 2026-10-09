@@ -14,7 +14,7 @@ tasks:
       - cargo build --locked {{.CLI_ARGS}}
 
   check:
-    desc: "Format and cross-check targets without platform SDKs"
+    desc: "Format and lint every target"
     cmds:
       - cargo fmt --all --check
       - for: { var: TARGETS }
@@ -24,7 +24,7 @@ tasks:
   check-target:
     internal: true
     cmds:
-      - cargo check --all-targets --locked --target {{.TARGET}} {{.CLI_ARGS}}
+      - cargo clippy --all-targets --locked --target {{.TARGET}} {{.CLI_ARGS}}
 
   test:
     desc: "Run every test on the host"

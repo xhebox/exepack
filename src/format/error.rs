@@ -6,7 +6,7 @@ pub struct Error {
 	kind: ErrorKind,
 	/// The item asked for.
 	name: String,
-	/// What went wrong, worded for whoever reads the log.
+	/// What went wrong.
 	message: String,
 	source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
@@ -48,7 +48,7 @@ impl Error {
 		}
 	}
 
-	/// `self`, about the item asked for as `name`.
+	/// Set the name of the item the error is about.
 	pub(super) fn named(self, name: &str) -> Self {
 		Self {
 			name: name.to_owned(),

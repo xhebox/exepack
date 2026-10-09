@@ -1,6 +1,6 @@
 [package]
 name = "exepack"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "Embed items into an executable's own container, one per item, with optional compression."
 license = "MIT"
@@ -34,5 +34,4 @@ editpe = "0.2.4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 [lints.rust]
-# A `pub` item must be reachable from the crate root.
 unreachable_pub = "deny"
