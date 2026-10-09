@@ -33,12 +33,12 @@ The output copies the permissions of `--main`, setuid and setgid included.
 ## Reading items back
 
 ```rust
-let mut kernel = exepack::format::find_loaded("test_item")?;
+let mut kernel = exepack::find_loaded("test_item")?;
 let mut bytes = Vec::new();
 kernel.read_to_end(&mut bytes)?;
 ```
 
-`format::find_loaded` returns `anyhow::Result`; a missing item is reported as an error naming the requested item.
+`find_loaded` returns `anyhow::Result`; a missing item is reported as an error naming the requested item.
 
 ## License
 

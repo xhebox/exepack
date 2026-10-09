@@ -212,12 +212,12 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 		std::fs::remove_file(std::env::current_exe()?)?;
 		for (name, expected) in items {
 			let mut bytes = Vec::new();
-			exepack::format::find_loaded(name)?.read_to_end(&mut bytes)?;
+			exepack::find_loaded(name)?.read_to_end(&mut bytes)?;
 			assert_eq!(bytes, expected.as_bytes(), "{name:?} did not read back");
 		}
 		// A name that was never embedded has to be reported rather than walked past the end of the records, which the padding behind them does not look like a record at all.
 		assert!(
-			exepack::format::find_loaded("never_embedded").is_err(),
+			exepack::find_loaded("never_embedded").is_err(),
 			"a missing item was not reported"
 		);
 		return Ok(());
