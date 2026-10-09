@@ -1,5 +1,9 @@
 version: '3'
 
+vars:
+  # Every target a release ships.
+  TARGETS: x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-pc-windows-msvc
+
 tasks:
   default:
     deps: [build]
@@ -13,14 +17,9 @@ tasks:
     desc: "Format and cross-check targets without platform SDKs"
     cmds:
       - cargo fmt --all --check
-      - task: check-target
-        vars: { TARGET: x86_64-unknown-linux-musl }
-      - task: check-target
-        vars: { TARGET: aarch64-unknown-linux-musl }
-      - task: check-target
-        vars: { TARGET: aarch64-apple-darwin }
-      - task: check-target
-        vars: { TARGET: x86_64-pc-windows-msvc }
+      - for: { var: TARGETS }
+        task: check-target
+        vars: { TARGET: '{{.ITEM}}' }
 
   check-target:
     internal: true
@@ -31,3 +30,45 @@ tasks:
     desc: "Run every test on the host"
     cmds:
       - cargo nextest run --locked {{.CLI_ARGS}}
+
+  # Pull the target's tarball from OCI_REPOSITORY, tagged with the sources' checksum; failing that, build it and
+  # push it with PUSH=1. oras pulls a layer under the name it was pushed as, so both run in dist.
+  dist:
+    desc: "Fetch or build the release tarball for TARGET from OCI_REPOSITORY (PUSH=1 publishes a fresh build)"
+    # The label keeps each target's checksum apart.
+    label: 'dist-{{.TARGET}}'
+    silent: true
+    requires:
+      vars:
+        - TARGET
+        - OCI_REPOSITORY
+        - name: PUSH
+          enum: ['0', '1']
+    vars:
+      TARBALL: 'exepack-{{.TARGET}}.tar.gz'
+    sources:
+      - 'src/**/*'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/config*.toml'
+      - 'rust-toolchain.toml'
+      - 'Taskfile.yml'
+    generates:
+      - 'dist/{{.TARBALL}}'
+    cmds:
+      # CHECKSUM is empty in vars; only cmds see it.
+      - |
+        set -ex
+        mkdir -p dist
+        cd dist
+        oras pull '{{.OCI_REPOSITORY}}:{{.TARGET}}-{{.CHECKSUM}}' && exit
+        cargo build --release --locked --target {{.TARGET}}
+        tar -czf '{{.TARBALL}}' -C '../target/{{.TARGET}}/release' 'exepack{{if contains "windows" .TARGET}}.exe{{end}}'
+        {{if eq .PUSH "1"}}oras push '{{.OCI_REPOSITORY}}:{{.TARGET}}-{{.CHECKSUM}}' '{{.TARBALL}}:application/gzip'{{end}}
+
+  dists:
+    desc: "Fetch or build the release tarball of every target in TARGETS from OCI_REPOSITORY"
+    cmds:
+      - for: { var: TARGETS }
+        task: dist
+        vars: { TARGET: '{{.ITEM}}' }

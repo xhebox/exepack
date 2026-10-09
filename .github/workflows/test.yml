@@ -6,10 +6,19 @@ on:
 permissions:
   contents: read
 
+env:
+  # Where task dist keeps release tarballs; OCI wants it lowercase, as this repository's name is.
+  OCI_REPOSITORY: ghcr.io/${{ github.repository }}
+  # Task's builtin tar on Windows has no -z; use the runner's.
+  TASK_CORE_UTILS: 'false'
+
 jobs:
   test:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -25,10 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install task
-        uses: arduino/setup-task@v3
-        with:
-          repo-token: ${{ github.token }}
+      - name: Set up task and oras
+        uses: ./.github/actions/setup-task-oras
 
       - name: Install rust
         uses: actions-rust-lang/setup-rust-toolchain@v2
@@ -43,3 +50,8 @@ jobs:
 
       - name: Test
         run: task test -- --target ${{ matrix.target }}
+
+      # Build and publish the release tarball here, so the release fetches it rather than building after the merge.
+      # A fork's token cannot push; the release builds what it does not find.
+      - name: Dist
+        run: task dist TARGET=${{ matrix.target }} PUSH=${{ github.event.pull_request.head.repo.fork && '0' || '1' }}

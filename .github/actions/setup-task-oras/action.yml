@@ -1,0 +1,16 @@
+name: Set up task and oras
+description: Install task and oras, and log in to GHCR.
+runs:
+  using: composite
+  steps:
+    - uses: arduino/setup-task@v3
+      with:
+        repo-token: ${{ github.token }}
+
+    - uses: oras-project/setup-oras@v2.0.2
+
+    - shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+        ACTOR: ${{ github.actor }}
+      run: printf '%s' "$TOKEN" | oras login ghcr.io -u "$ACTOR" --password-stdin
