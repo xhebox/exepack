@@ -13,6 +13,26 @@ env:
   TASK_CORE_UTILS: 'false'
 
 jobs:
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: arduino/setup-task@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      # rust-toolchain.toml brings every target the check crosses to.
+      - name: Install rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          # Leave RUSTFLAGS unset; it would override the rustflags in .cargo/config.toml.
+          rustflags: ""
+          cache-shared-key: cargo-check
+
+      - name: Check
+        run: task check
+
   test:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}

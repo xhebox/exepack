@@ -90,6 +90,25 @@ fn an_image_of_no_known_container_is_refused() -> Result<()> {
 	Ok(())
 }
 
+#[test]
+fn a_level_the_compression_lacks_is_refused() -> Result<()> {
+	let scratch = tempfile::tempdir()?;
+	let out = scratch.path().join("packed");
+	let stderr = failure(&[
+		"--main",
+		&carrier().display().to_string(),
+		"--output",
+		&out.display().to_string(),
+		"--compress",
+		"gzip:10",
+		"--item",
+		&format!("kernel={}", carrier().display()),
+	]);
+	assert!(stderr.contains("0-9"), "{stderr}");
+	assert!(!out.exists(), "a rejected level left an output image");
+	Ok(())
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn a_macho_is_refused_away_from_macos() -> Result<()> {
@@ -195,6 +214,22 @@ fn every_item_is_written_into_the_image() -> Result<()> {
 	Ok(())
 }
 
+/// A copy of the carrier under `dir` whose header points at no section table, as a stripped image's may.
+#[cfg(target_os = "linux")]
+fn sectionless(dir: &std::path::Path) -> Result<PathBuf> {
+	let mut bytes = std::fs::read(carrier())?;
+	let endian = FileHeader64::<Endianness>::parse(bytes.as_slice())?.endian()?;
+	let (header, _) = pod::from_bytes_mut::<FileHeader64<Endianness>>(&mut bytes)
+		.map_err(|_| anyhow::anyhow!("invalid carrier header"))?;
+	header.e_shoff.set(endian, 0);
+	header.e_shnum.set(endian, 0);
+	header.e_shstrndx.set(endian, object::elf::SHN_UNDEF);
+	let sectionless = dir.join("sectionless");
+	std::fs::write(&sectionless, bytes)?;
+	std::fs::set_permissions(&sectionless, std::fs::metadata(carrier())?.permissions())?;
+	Ok(sectionless)
+}
+
 #[test]
 fn a_packed_copy_reads_its_items_back() -> Result<()> {
 	let items = [
@@ -233,26 +268,23 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 		})
 		.collect::<Result<_>>()?;
 	let mains = cfg_select! {
-		target_os = "linux" => {{
-			let mut bytes = std::fs::read(carrier())?;
-			let endian = FileHeader64::<Endianness>::parse(bytes.as_slice())?.endian()?;
-			let (header, _) = pod::from_bytes_mut::<FileHeader64<Endianness>>(&mut bytes)
-				.map_err(|_| anyhow::anyhow!("invalid carrier header"))?;
-			header.e_shoff.set(endian, 0);
-			header.e_shnum.set(endian, 0);
-			header.e_shstrndx.set(endian, object::elf::SHN_UNDEF);
-			let sectionless = scratch.path().join("sectionless");
-			std::fs::write(&sectionless, bytes)?;
-			std::fs::set_permissions(&sectionless, std::fs::metadata(carrier())?.permissions())?;
-			vec![carrier(), sectionless]
-		}}
-		_ => { vec![carrier()] }
+		target_os = "linux" => vec![carrier(), sectionless(scratch.path())?],
+		_ => vec![carrier()],
 	};
 	for (index, main) in mains.iter().enumerate() {
-		for compress in [None, Some("gzip"), Some("none")] {
-			let out = scratch
-				.path()
-				.join(format!("{index}-{}", compress.unwrap_or("default")));
+		for compress in [
+			None,
+			Some("gzip"),
+			Some("gzip:1"),
+			Some("brotli"),
+			Some("brotli:5"),
+			Some("zstd"),
+			Some("none"),
+		] {
+			let out = scratch.path().join(format!(
+				"{index}-{}",
+				compress.unwrap_or("default").replace(':', "-")
+			));
 			let mut command = Command::new(exepack());
 			command.args([
 				"--main",

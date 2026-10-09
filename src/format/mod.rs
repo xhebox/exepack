@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::io::{self, Cursor, Read, Write};
 
-use anyhow::{Result, bail, ensure};
-use clap::ValueEnum;
+use std::str::FromStr;
+
+use anyhow::{Context, Result, bail, ensure};
 use flate2::Compression as Level;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use strum::FromRepr;
 
 #[cfg(target_os = "linux")]
 mod elf;
@@ -15,22 +15,63 @@ mod macho;
 #[cfg(target_os = "windows")]
 mod pe;
 
-#[derive(Clone, Copy, FromRepr, ValueEnum)]
-#[repr(u8)]
+/// How each item is compressed, with the level for those that take one.
+#[derive(Clone, Copy)]
 pub enum Compression {
-	None = 0,
-	Gzip = 1,
+	None,
+	/// Levels 0-9.
+	Gzip(u32),
+	/// Levels 0-11.
+	Brotli(u32),
+	/// ruzstd implements only its fastest level, zstd's 1.
+	Zstd,
 }
 
 impl Compression {
+	/// The tag stored ahead of each item, which reading it back dispatches on.
+	fn tag(self) -> u8 {
+		match self {
+			Self::None => 0,
+			Self::Gzip(_) => 1,
+			Self::Brotli(_) => 2,
+			Self::Zstd => 3,
+		}
+	}
+
+	/// `self`, if its level is one the compression has.
+	fn checked(self) -> Result<Self> {
+		match self {
+			Self::Gzip(level) => ensure!(level <= 9, "gzip takes a level in 0-9, not {level}"),
+			Self::Brotli(level) => {
+				ensure!(level <= 11, "brotli takes a level in 0-11, not {level}")
+			}
+			Self::None | Self::Zstd => {}
+		}
+		Ok(self)
+	}
+
 	/// Compress `input` onto the end of `out`, tag first. The caller clears `out` between items.
 	fn encode(self, mut input: impl Read, out: &mut Vec<u8>) -> Result<()> {
-		out.push(self as u8);
+		out.push(self.tag());
 		match self {
-			Self::Gzip => {
-				let mut encoder = GzEncoder::new(&mut *out, Level::default());
+			Self::Gzip(level) => {
+				let mut encoder = GzEncoder::new(&mut *out, Level::new(level));
 				io::copy(&mut input, &mut encoder)?;
 				encoder.finish()?;
+			}
+			Self::Brotli(level) => {
+				// The largest window brotli allows.
+				let mut encoder = brotli::CompressorWriter::new(&mut *out, 4096, level, 24);
+				io::copy(&mut input, &mut encoder)?;
+				// Ends the stream; writing into a Vec cannot fail.
+				encoder.into_inner();
+			}
+			Self::Zstd => {
+				ruzstd::encoding::compress(
+					input,
+					&mut *out,
+					ruzstd::encoding::CompressionLevel::Fastest,
+				);
 			}
 			Self::None => {
 				input.read_to_end(out)?;
@@ -44,11 +85,41 @@ impl Compression {
 			.split_first()
 			.ok_or_else(|| anyhow::anyhow!("the item carries no compression tag"))?;
 		let reader = Cursor::new(data);
-		match Self::from_repr(tag) {
-			Some(Self::Gzip) => Ok(Box::new(GzDecoder::new(reader))),
-			Some(Self::None) => Ok(Box::new(reader)),
-			None => bail!("the item is compressed under tag {tag}, which this build does not know"),
+		match tag {
+			0 => Ok(Box::new(reader)),
+			1 => Ok(Box::new(GzDecoder::new(reader))),
+			2 => Ok(Box::new(brotli::Decompressor::new(reader, 4096))),
+			3 => Ok(Box::new(ruzstd::decoding::StreamingDecoder::new(reader)?)),
+			_ => bail!("the item is compressed under tag {tag}, which this build does not know"),
 		}
+	}
+}
+
+/// `none`, `zstd`, or `gzip` and `brotli` with an optional `:LEVEL`, by default 6 and 11.
+impl FromStr for Compression {
+	type Err = anyhow::Error;
+
+	fn from_str(spec: &str) -> Result<Self> {
+		let (name, level) = match spec.split_once(':') {
+			Some((name, level)) => (
+				name,
+				Some(
+					level
+						.parse()
+						.with_context(|| format!("{level:?} is not a level"))?,
+				),
+			),
+			None => (spec, None),
+		};
+		let compression = match (name, level) {
+			("none", None) => Self::None,
+			("gzip", level) => Self::Gzip(level.unwrap_or(6)),
+			("brotli", level) => Self::Brotli(level.unwrap_or(11)),
+			("zstd", None) => Self::Zstd,
+			("none" | "zstd", Some(_)) => bail!("{name} takes no level"),
+			_ => bail!("{name:?} is none of none, gzip, brotli and zstd"),
+		};
+		compression.checked()
 	}
 }
 
@@ -112,10 +183,12 @@ impl Container {
 /// The bytes embedded under `name`, decompressed as they are read.
 pub fn find_loaded(name: &str) -> Result<Box<dyn Read + '_>> {
 	let stored = cfg_select! {
-		target_os = "linux" => { elf::find(name)? }
-		target_os = "macos" => { macho::find(name)? }
-		target_os = "windows" => { pe::find(name)? }
-		_ => { bail!("reading embedded items is unsupported on this platform") }
+		target_os = "linux" => elf::find(name)?,
+		target_os = "macos" => macho::find(name)?,
+		target_os = "windows" => pe::find(name)?,
+		_ => {
+			bail!("reading embedded items is unsupported on this platform")
+		}
 	};
 	Compression::decode(stored)
 }
