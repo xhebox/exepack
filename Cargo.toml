@@ -1,6 +1,6 @@
 [package]
 name = "exepack"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Embed items into an executable: gzip them into the image's own container, one per item."
 license = "MIT"
