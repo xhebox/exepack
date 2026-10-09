@@ -1,0 +1,8 @@
+# Every matching target.*.rustflags is joined, and any match makes cargo ignore build.rustflags,
+# so the common flags sit under a cfg that always matches.
+[target.'cfg(all())']
+rustflags = ["-D", "warnings", "-C", "force-frame-pointers=yes", "-C", "symbol-mangling-version=v0"]
+
+# Static CRT so the binary does not need the VC++ redistributable.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

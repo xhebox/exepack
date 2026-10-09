@@ -1,14 +1,5 @@
 version: '3'
 
-vars:
-  PROFILE: '{{.PROFILE | default "dev"}}'
-  PROFILE_ARG: '{{if ne .PROFILE "dev"}}--profile {{.PROFILE}}{{end}}'
-  CARGO_PROFILE_ARG: '{{if ne .PROFILE "dev"}}--cargo-profile {{.PROFILE}}{{end}}'
-  RUSTFLAGS: '-D warnings -C force-frame-pointers=yes -C symbol-mangling-version=v0'
-
-env:
-  RUSTFLAGS: '{{.RUSTFLAGS}}'
-
 tasks:
   default:
     deps: [build]
@@ -16,7 +7,7 @@ tasks:
   build:
     desc: "Build the tool for the host"
     cmds:
-      - cargo build {{.PROFILE_ARG}} --locked {{.CLI_ARGS}}
+      - cargo build --locked {{.CLI_ARGS}}
 
   check:
     desc: "Format and cross-check targets without platform SDKs"
@@ -27,14 +18,16 @@ tasks:
       - task: check-target
         vars: { TARGET: aarch64-unknown-linux-musl }
       - task: check-target
-        vars: { TARGET: x86_64-pc-windows-gnu }
+        vars: { TARGET: aarch64-apple-darwin }
+      - task: check-target
+        vars: { TARGET: x86_64-pc-windows-msvc }
 
   check-target:
     internal: true
     cmds:
-      - cargo check {{.PROFILE_ARG}} --all-targets --locked --target {{.TARGET}}
+      - cargo check --all-targets --locked --target {{.TARGET}} {{.CLI_ARGS}}
 
   test:
     desc: "Run every test on the host"
     cmds:
-      - cargo nextest run {{.CARGO_PROFILE_ARG}} --locked {{.CLI_ARGS}}
+      - cargo nextest run --locked {{.CLI_ARGS}}

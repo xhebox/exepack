@@ -26,7 +26,7 @@ jobs:
             target: aarch64-apple-darwin
             bin: exepack
           - runs-on: windows-2025
-            target: x86_64-pc-windows-gnu
+            target: x86_64-pc-windows-msvc
             bin: exepack.exe
     steps:
       - uses: actions/checkout@v7
@@ -40,13 +40,18 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: ${{ matrix.target }}
+          # Leave RUSTFLAGS unset; it would override the rustflags in .cargo/config.toml.
+          rustflags: ""
           cache-shared-key: cargo-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
       - name: Test
-        run: task test PROFILE=release -- --target ${{ matrix.target }}
+        run: task test -- --target ${{ matrix.target }}
+
+      - name: Build
+        run: task build -- --release --target ${{ matrix.target }}
 
       - name: Package
         run: |
