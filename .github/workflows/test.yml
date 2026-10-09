@@ -9,6 +9,8 @@ permissions:
 env:
   # Where task dist keeps release tarballs; OCI wants it lowercase, as this repository's name is.
   OCI_REPOSITORY: ghcr.io/${{ github.repository }}
+  # Task's builtin tar on Windows has no -z; use the runner's.
+  TASK_CORE_UTILS: 'false'
 
 jobs:
   test:
