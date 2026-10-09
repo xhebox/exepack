@@ -13,7 +13,8 @@
 
 use std::{io::Write, mem::size_of};
 
-use anyhow::{Context, Result, bail, ensure};
+use super::OrInvalid;
+use anyhow::{Context, Result, ensure};
 use object::{
 	endian::LittleEndian,
 	macho::{self, LinkeditDataCommand, MachHeader64},
@@ -94,23 +95,27 @@ pub(super) fn append(
 }
 
 /// The bytes stored under `name` in the running image.
-pub(super) fn find(name: &str) -> Result<&'static [u8]> {
+pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	// SAFETY: image 0 is the running executable, whose headers stay mapped for the life of the process.
 	let pointer = unsafe { _dyld_get_image_header(0) };
 	if pointer.is_null() {
-		bail!("the running process has no Mach-O image 0");
+		return Err(super::Error::invalid(
+			"the running process has no Mach-O image 0",
+		));
 	}
 	// SAFETY: dyld image headers contain the magic identifying their header layout.
 	let magic = unsafe { pointer.cast::<u32>().read() };
-	ensure!(
-		magic == macho::MH_MAGIC_64,
-		"the running image is not a 64-bit little-endian Mach-O"
-	);
+	if magic != macho::MH_MAGIC_64 {
+		return Err(super::Error::invalid(
+			"the running image is not a 64-bit little-endian Mach-O",
+		));
+	}
 	// SAFETY: the checked magic identifies a mapped 64-bit Mach-O header.
 	let bytes =
 		unsafe { std::slice::from_raw_parts(pointer, size_of::<MachHeader64<LittleEndian>>()) };
-	let header = header(bytes)?;
-	let sizeofcmds = usize::try_from(header.sizeofcmds.get(LittleEndian))?;
+	let header = MachHeader64::<LittleEndian>::parse(bytes, 0)
+		.or_invalid("the running image's Mach-O header is malformed")?;
+	let sizeofcmds = header.sizeofcmds.get(LittleEndian) as usize;
 	// SAFETY: the image maps its header and `sizeofcmds` bytes of load commands as one contiguous range.
 	let bytes = unsafe {
 		std::slice::from_raw_parts(
@@ -120,9 +125,15 @@ pub(super) fn find(name: &str) -> Result<&'static [u8]> {
 	};
 	let mut linkedit = None;
 	let mut signature = None;
-	for command in header.load_commands(LittleEndian, bytes, 0)? {
-		let command = command?;
-		match command.variant()? {
+	let commands = header
+		.load_commands(LittleEndian, bytes, 0)
+		.or_invalid("the running image's load commands are malformed")?;
+	for command in commands {
+		let command = command.or_invalid("a load command of the running image is malformed")?;
+		let variant = command
+			.variant()
+			.or_invalid("a load command of the running image is malformed")?;
+		match variant {
 			LoadCommandVariant::Segment64(segment, _) if segment.name() == b"__LINKEDIT" => {
 				linkedit = Some(segment);
 			}
@@ -132,26 +143,31 @@ pub(super) fn find(name: &str) -> Result<&'static [u8]> {
 			_ => {}
 		}
 	}
-	let linkedit = linkedit.context("the running image has no __LINKEDIT segment")?;
-	let signature = usize::try_from(signature.context("the running image is not signed")?)?;
+	let linkedit = linkedit.or_invalid("the running image has no __LINKEDIT segment")?;
+	// Packing always signs the image, so an unsigned one was never packed.
+	let signature = signature.ok_or_else(|| {
+		super::Error::not_found("the running image is not signed, so it carries no items")
+	})? as usize;
 	let end = signature
-		.checked_sub(usize::try_from(linkedit.fileoff.get(LittleEndian))?)
+		.checked_sub(linkedit.fileoff.get(LittleEndian) as usize)
 		.filter(|&end| end as u64 <= linkedit.filesize.get(LittleEndian))
-		.context("the code signature is outside the __LINKEDIT segment")?;
+		.or_invalid("the code signature lies outside the __LINKEDIT segment")?;
 	// SAFETY: image 0 is the same executable whose load commands were read above.
 	let slide = unsafe { _dyld_get_image_vmaddr_slide(0) };
-	let address = usize::try_from(linkedit.vmaddr.get(LittleEndian))?.wrapping_add_signed(slide);
+	let address = (linkedit.vmaddr.get(LittleEndian) as usize).wrapping_add_signed(slide);
 	// SAFETY: dyld maps this segment at `vmaddr + slide`, and `end` was checked against its file-backed size.
 	let payload = unsafe { std::slice::from_raw_parts(address as *const u8, end) };
 
 	let start = payload
 		.windows(MARKER.len())
 		.position(|bytes| bytes == MARKER)
-		.context("no items are embedded in this Mach-O")?;
+		.ok_or_else(|| super::Error::not_found("the running image carries no items"))?;
 	let mut records = &payload[start + MARKER.len()..];
-	while let Some((header, body)) = records.split_at_checked(RECORD_LEN) {
-		let name_len = usize::from(u16::from_le_bytes(header[..2].try_into()?));
-		let data_len = usize::try_from(u64::from_le_bytes(header[2..].try_into()?))?;
+	while let Some((header, body)) = records.split_first_chunk::<RECORD_LEN>() {
+		let [name_0, name_1, data_len @ ..] = *header;
+		let name_len = usize::from(u16::from_le_bytes([name_0, name_1]));
+		// The record lies in the mapped segment, so its length fits in a usize.
+		let data_len = u64::from_le_bytes(data_len) as usize;
 		// An item name is never empty, so a zero length marks the alignment padding after the last record.
 		if name_len == 0 {
 			break;
@@ -167,7 +183,9 @@ pub(super) fn find(name: &str) -> Result<&'static [u8]> {
 		}
 		records = rest;
 	}
-	bail!("no item is embedded as {name:?}")
+	Err(super::Error::not_found(
+		"the running image carries no such item",
+	))
 }
 
 unsafe extern "C" {

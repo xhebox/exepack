@@ -214,6 +214,14 @@ fn every_item_is_written_into_the_image() -> Result<()> {
 	Ok(())
 }
 
+#[test]
+fn an_unpacked_build_finds_nothing_to_fall_back_from() {
+	let missing = exepack::find_loaded("kernel")
+		.err()
+		.expect("an unpacked build read an item back");
+	assert_eq!(missing.kind(), exepack::ErrorKind::NotFound, "{missing}");
+}
+
 /// A copy of the carrier under `dir` whose header points at no section table, as a stripped image's may.
 #[cfg(target_os = "linux")]
 fn sectionless(dir: &std::path::Path) -> Result<PathBuf> {
@@ -251,10 +259,11 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 			assert_eq!(bytes, expected.as_bytes(), "{name:?} did not read back");
 		}
 		// A name that was never embedded has to be reported rather than walked past the end of the records, which the padding behind them does not look like a record at all.
-		assert!(
-			exepack::find_loaded("never_embedded").is_err(),
-			"a missing item was not reported"
-		);
+		let missing = exepack::find_loaded("never_embedded")
+			.err()
+			.expect("a missing item was not reported");
+		assert_eq!(missing.kind(), exepack::ErrorKind::NotFound, "{missing}");
+		assert_eq!(missing.name(), "never_embedded");
 		return Ok(());
 	}
 
