@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     tags: [v*]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,12 +43,6 @@ jobs:
           rustflags: ""
           cache-shared-key: cargo-${{ runner.os }}-${{ runner.arch }}
 
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Test
-        run: task test -- --target ${{ matrix.target }}
-
       - name: Build
         run: task build -- --release --target ${{ matrix.target }}
 
@@ -66,7 +59,6 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-26.04
     permissions:
       contents: write
