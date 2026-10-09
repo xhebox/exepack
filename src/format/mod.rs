@@ -1,12 +1,16 @@
 use std::collections::HashSet;
 use std::io::{self, Cursor, Read, Write};
-
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
 use flate2::Compression as Level;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+
+mod error;
+
+use error::OrInvalid;
+pub use error::{Error, ErrorKind};
 
 #[cfg(target_os = "linux")]
 mod elf;
@@ -80,18 +84,25 @@ impl Compression {
 		Ok(())
 	}
 
-	fn decode<'a>(stored: &'a [u8]) -> Result<Box<dyn Read + 'a>> {
+	fn decode<'a>(stored: &'a [u8]) -> Result<Box<dyn Read + 'a>, Error> {
 		let (&tag, data) = stored
 			.split_first()
-			.ok_or_else(|| anyhow::anyhow!("the item carries no compression tag"))?;
+			.or_invalid("the item carries no compression tag")?;
 		let reader = Cursor::new(data);
-		match tag {
-			0 => Ok(Box::new(reader)),
-			1 => Ok(Box::new(GzDecoder::new(reader))),
-			2 => Ok(Box::new(brotli::Decompressor::new(reader, 4096))),
-			3 => Ok(Box::new(ruzstd::decoding::StreamingDecoder::new(reader)?)),
-			_ => bail!("the item is compressed under tag {tag}, which this build does not know"),
-		}
+		Ok(match tag {
+			0 => Box::new(reader),
+			1 => Box::new(GzDecoder::new(reader)),
+			2 => Box::new(brotli::Decompressor::new(reader, 4096)),
+			3 => Box::new(
+				ruzstd::decoding::StreamingDecoder::new(reader)
+					.or_invalid("the zstd frame header is malformed")?,
+			),
+			_ => {
+				return Err(Error::invalid(format!(
+					"the item is compressed under tag {tag}, which this build does not know; a newer exepack stored it"
+				)));
+			}
+		})
 	}
 }
 
@@ -180,15 +191,18 @@ impl Container {
 	}
 }
 
-/// The bytes embedded under `name`, decompressed as they are read.
-pub fn find_loaded(name: &str) -> Result<Box<dyn Read + '_>> {
-	let stored = cfg_select! {
-		target_os = "linux" => elf::find(name)?,
-		target_os = "macos" => macho::find(name)?,
-		target_os = "windows" => pe::find(name)?,
-		_ => {
-			bail!("reading embedded items is unsupported on this platform")
-		}
+/// The bytes embedded under `name`, decompressed as they are read; a read fails with [`io::ErrorKind::InvalidData`] if
+/// the bytes do not decompress.
+pub fn find_loaded(name: &str) -> Result<Box<dyn Read + '_>, Error> {
+	let found = cfg_select! {
+		target_os = "linux" => elf::find(name),
+		target_os = "macos" => macho::find(name),
+		target_os = "windows" => pe::find(name),
+		_ => Err(Error::invalid(
+			"reading embedded items is unsupported on this platform",
+		)),
 	};
-	Compression::decode(stored)
+	found
+		.and_then(Compression::decode)
+		.map_err(|error| error.named(name))
 }

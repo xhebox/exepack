@@ -38,7 +38,15 @@ let mut bytes = Vec::new();
 kernel.read_to_end(&mut bytes)?;
 ```
 
-`find_loaded` returns `anyhow::Result`; a missing item is reported as an error naming the requested item.
+A build that carries no such item, such as an unpacked one, fails with `ErrorKind::NotFound`, so it can fall back:
+
+```rust
+match exepack::find_loaded("test_item") {
+    Ok(item) => item,
+    Err(error) if error.kind() == exepack::ErrorKind::NotFound => Box::new(std::fs::File::open("test_item")?),
+    Err(error) => return Err(error.into()),
+}
+```
 
 ## License
 

@@ -2,7 +2,8 @@
 
 use std::{io::Write, mem::size_of};
 
-use anyhow::{Context, Result, bail, ensure};
+use super::OrInvalid;
+use anyhow::{Context, Result, ensure};
 use object::{
 	elf::{self, FileHeader64, NoteHeader64, ProgramHeader64, SectionHeader64},
 	endian::{Endianness, NativeEndian},
@@ -179,7 +180,7 @@ pub(super) fn append(
 	output.write_all(&built).context("write ELF")
 }
 
-pub(super) fn find(name: &str) -> Result<&'static [u8]> {
+pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	#[cfg(target_pointer_width = "64")]
 	type NativeHeader = FileHeader64<NativeEndian>;
 	#[cfg(target_pointer_width = "32")]
@@ -230,25 +231,27 @@ pub(super) fn find(name: &str) -> Result<&'static [u8]> {
 		let Some(load) = load.filter(|_| size != 0) else {
 			continue;
 		};
-		let address = usize::try_from(load.p_vaddr.get(NativeEndian))?
-			.wrapping_add(usize::try_from(offset - load.p_offset.get(NativeEndian))?)
+		// The segment is mapped, so its address and size fit in a usize.
+		let address = (load.p_vaddr.get(NativeEndian) as usize)
+			.wrapping_add((offset - load.p_offset.get(NativeEndian)) as usize)
 			.wrapping_add(image.base);
 		// SAFETY: the note range was checked against the executable's file-backed load segments.
-		let bytes =
-			unsafe { std::slice::from_raw_parts(address as *const u8, usize::try_from(size)?) };
-		for note in NoteIterator::<NativeHeader>::new(
+		let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, size as usize) };
+		let notes = NoteIterator::<NativeHeader>::new(
 			NativeEndian,
 			program.p_align.get(NativeEndian),
 			bytes,
-		)? {
-			let note = note?;
+		)
+		.or_invalid("a PT_NOTE segment of the running image is malformed")?;
+		for note in notes {
+			let note = note.or_invalid("a note of the running image is malformed")?;
 			if note.name() != b"SUI" || note.n_type(NativeEndian) != NOTE_TYPE {
 				continue;
 			}
-			let Some((length, body)) = note.desc().split_at_checked(2) else {
+			let Some((length, body)) = note.desc().split_first_chunk() else {
 				continue;
 			};
-			let length = usize::from(u16::from_le_bytes(length.try_into()?));
+			let length = usize::from(u16::from_le_bytes(*length));
 			let Some((stored_name, data)) = body.split_at_checked(length) else {
 				continue;
 			};
@@ -257,5 +260,7 @@ pub(super) fn find(name: &str) -> Result<&'static [u8]> {
 			}
 		}
 	}
-	bail!("no item is embedded as {name:?}")
+	Err(super::Error::not_found(
+		"the running image carries no such item",
+	))
 }

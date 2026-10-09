@@ -2,4 +2,4 @@
 
 mod format;
 
-pub use format::{Compression, Container, find_loaded};
+pub use format::{Compression, Container, Error, ErrorKind, find_loaded};

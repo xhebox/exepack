@@ -6,6 +6,8 @@ use anyhow::{Context, Result, bail, ensure};
 
 use editpe::constants::RT_RCDATA;
 
+use super::OrInvalid;
+
 /// Add each item to the image as a resource of its own.
 ///
 /// The resources the image already carries are kept, so a manifest or version block survives.
@@ -56,7 +58,7 @@ pub(super) fn append(
 }
 
 /// The bytes stored as the `name` resource of the running module.
-pub(super) fn find(name: &str) -> Result<&'static [u8]> {
+pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	use windows_sys::Win32::System::LibraryLoader::{
 		FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
 	};
@@ -69,20 +71,25 @@ pub(super) fn find(name: &str) -> Result<&'static [u8]> {
 	unsafe {
 		let module = GetModuleHandleW(std::ptr::null());
 		if module.is_null() {
-			return Err(std::io::Error::last_os_error()).context("find the executable module");
+			return Err(std::io::Error::last_os_error())
+				.or_invalid("the executable module cannot be found");
 		}
 		let resource = FindResourceW(module, wide.as_ptr(), RT_RCDATA as usize as *const u16);
 		if resource.is_null() {
-			bail!("no item is embedded as {name:?}");
+			return Err(super::Error::not_found(
+				"the running image carries no such item",
+			));
 		}
 		let size = SizeofResource(module, resource) as usize;
 		let data = LoadResource(module, resource);
 		if data.is_null() {
-			return Err(std::io::Error::last_os_error()).context("load the item resource");
+			return Err(std::io::Error::last_os_error())
+				.or_invalid("the item resource cannot be loaded");
 		}
 		let ptr = LockResource(data);
 		if ptr.is_null() {
-			return Err(std::io::Error::last_os_error()).context("map the item resource");
+			return Err(std::io::Error::last_os_error())
+				.or_invalid("the item resource cannot be mapped");
 		}
 		Ok(std::slice::from_raw_parts(ptr.cast::<u8>(), size))
 	}
