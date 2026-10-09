@@ -1,6 +1,6 @@
 # exepack
 
-Embed items into a single executable with compression.
+Embed items into a single executable, with optional compression.
 
 ELF and Mach-O inspired by [libsui](https://github.com/denoland/sui), PE based on [editpe](https://github.com/Systemcluster/editpe).
 
@@ -15,7 +15,7 @@ Prebuilt binaries come from the GitHub releases; `cargo install exepack` builds 
 ## Usage
 
 ```
-exepack --main <executable> --output <image> [--compress gzip|none] --item NAME=PATH [--item NAME=PATH ...]
+exepack --main <executable> --output <image> [--compress none|zstd|gzip[:LEVEL]|brotli[:LEVEL]] --item NAME=PATH [--item NAME=PATH ...]
 ```
 
 ```console
@@ -26,7 +26,7 @@ $ build/dist/myapp
 
 Repeat `--item` once per item; names must be unique.
 
-Compression defaults to `gzip`; use `--compress none` to embed the original bytes.
+Compression defaults to `gzip`; `--compress none` embeds the original bytes. `gzip` takes a level in 0-9 (default 6) and `brotli` one in 0-11 (default 11), as in `--compress brotli:5`.
 
 The output copies the permissions of `--main`, setuid and setgid included.
 

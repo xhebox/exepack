@@ -6,7 +6,7 @@ use clap::Parser;
 use exepack::{Compression, Container};
 
 #[derive(Parser)]
-#[command(about = "Embed items into a single executable")]
+#[command(version, about = "Embed items into a single executable")]
 struct Cli {
 	/// The executable the items are embedded in.
 	#[arg(long)]
@@ -14,8 +14,8 @@ struct Cli {
 	/// The image to write: `main` carrying the items.
 	#[arg(long)]
 	output: PathBuf,
-	/// Compression applied to each item.
-	#[arg(long, value_enum, default_value = "gzip")]
+	/// Compression applied to each item: none, zstd, gzip[:0-9] (default 6) or brotli[:0-11] (default 11).
+	#[arg(long, default_value = "gzip")]
 	compress: Compression,
 	/// An item to embed, as `NAME=PATH`; repeat once per item.
 	#[arg(long = "item", value_name = "NAME=PATH", required = true)]
@@ -57,7 +57,8 @@ fn main() -> Result<()> {
 			.metadata()
 			.with_context(|| format!("read the mode of {}", args.main.display()))?
 			.permissions()
-			.mode() & 0o7777
+			.mode()
+			& 0o7777
 	};
 	let mut bytes = Vec::new();
 	image
