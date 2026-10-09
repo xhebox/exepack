@@ -4,6 +4,14 @@ Embed items into a single executable with compression.
 
 ELF and Mach-O inspired by [libsui](https://github.com/denoland/sui), PE based on [editpe](https://github.com/Systemcluster/editpe).
 
+## Install
+
+```
+cargo binstall exepack
+```
+
+Prebuilt binaries come from the GitHub releases; `cargo install exepack` builds from source.
+
 ## Usage
 
 ```
