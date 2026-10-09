@@ -32,7 +32,7 @@ pub enum Compression {
 }
 
 impl Compression {
-	/// The tag stored ahead of each item, which reading it back dispatches on.
+	/// The tag stored ahead of each item; `decode` matches on the same values.
 	fn tag(self) -> u8 {
 		match self {
 			Self::None => 0,
@@ -42,7 +42,7 @@ impl Compression {
 		}
 	}
 
-	/// `self`, if its level is one the compression has.
+	/// Reject a level outside the compression's range.
 	fn checked(self) -> Result<Self> {
 		match self {
 			Self::Gzip(level) => ensure!(level <= 9, "gzip takes a level in 0-9, not {level}"),
@@ -166,7 +166,7 @@ impl Container {
 	) -> Result<()> {
 		let mut items = items.into_iter();
 		let mut names = HashSet::new();
-		// The compressed bytes land in the caller's reusable buffer; an empty returned name signals the end of the items.
+		// Compress the next item into `out`, which the caller clears and reuses, and return its name; an empty name means no items are left.
 		let store = |out: &mut Vec<u8>| -> Result<String> {
 			let Some((name, input)) = items.next() else {
 				return Ok(String::new());
@@ -191,8 +191,10 @@ impl Container {
 	}
 }
 
-/// The bytes embedded under `name`, decompressed as they are read; a read fails with [`io::ErrorKind::InvalidData`] if
-/// the bytes do not decompress.
+/// The bytes embedded under `name`, decompressed as they are read.
+///
+/// Fails with [`ErrorKind::NotFound`] if the running image carries no such item, and with [`ErrorKind::Invalid`] if it
+/// cannot be read back.
 pub fn find_loaded(name: &str) -> Result<Box<dyn Read + '_>, Error> {
 	let found = cfg_select! {
 		target_os = "linux" => elf::find(name),

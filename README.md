@@ -2,7 +2,7 @@
 
 Embed items into a single executable, with optional compression.
 
-ELF and Mach-O inspired by [libsui](https://github.com/denoland/sui), PE based on [editpe](https://github.com/Systemcluster/editpe).
+ELF and Mach-O is highly inspired by [libsui](https://github.com/denoland/sui), PE based on [editpe](https://github.com/Systemcluster/editpe).
 
 ## Install
 

@@ -12,7 +12,7 @@ use super::OrInvalid;
 ///
 /// The resources the image already carries are kept, so a manifest or version block survives.
 ///
-/// `items` is called once per item with the buffer to write into, which is cleared before each call. The bytes are handed to the resource directory as they are, so each item owns the bytes it was read into.
+/// Each item's buffer is moved into its resource.
 pub(super) fn append(
 	image: &[u8],
 	mut items: impl FnMut(&mut Vec<u8>) -> Result<String>,
@@ -39,6 +39,7 @@ pub(super) fn append(
 			break;
 		}
 		ensure!(!name.contains('\0'), "PE item name {name:?} has a NUL");
+		// Windows matches resource names case-insensitively, so names differing only in case collide.
 		let key = editpe::ResourceEntryName::try_from_string(name.to_uppercase())?;
 		if table.get(&key).is_some() {
 			bail!("PE resource name {name:?} is embedded twice");
@@ -67,7 +68,7 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 		.encode_utf16()
 		.chain(std::iter::once(0))
 		.collect();
-	// Windows owns the executable module and its mapped resources for the lifetime of the process.
+	// SAFETY: Windows owns the executable module and its mapped resources for the lifetime of the process.
 	unsafe {
 		let module = GetModuleHandleW(std::ptr::null());
 		if module.is_null() {

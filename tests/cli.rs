@@ -13,7 +13,7 @@ fn exepack() -> &'static str {
 	env!("CARGO_BIN_EXE_exepack")
 }
 
-/// The image to embed into: this test binary, which is one of the containers the tool writes. Nothing has to be built for it.
+/// The image to embed into: this test binary.
 fn carrier() -> PathBuf {
 	std::env::current_exe().expect("the test binary has a path")
 }
@@ -215,7 +215,7 @@ fn every_item_is_written_into_the_image() -> Result<()> {
 }
 
 #[test]
-fn an_unpacked_build_finds_nothing_to_fall_back_from() {
+fn an_unpacked_build_reports_not_found() {
 	let missing = exepack::find_loaded("kernel")
 		.err()
 		.expect("an unpacked build read an item back");
@@ -238,6 +238,64 @@ fn sectionless(dir: &std::path::Path) -> Result<PathBuf> {
 	Ok(sectionless)
 }
 
+/// A copy of the carrier under `dir` whose last load segment claims `extra` more bytes of memory than the file holds, as a large `.bss` does.
+#[cfg(target_os = "linux")]
+fn with_bss(dir: &std::path::Path, extra: u64) -> Result<PathBuf> {
+	let mut bytes = std::fs::read(carrier())?;
+	let endian = FileHeader64::<Endianness>::parse(bytes.as_slice())?.endian()?;
+	let (header, _) = pod::from_bytes::<FileHeader64<Endianness>>(&bytes)
+		.map_err(|_| anyhow::anyhow!("invalid carrier header"))?;
+	let (phoff, phnum) = (
+		usize::try_from(header.e_phoff.get(endian))?,
+		usize::from(header.e_phnum.get(endian)),
+	);
+	let (programs, _) = pod::slice_from_bytes_mut::<object::elf::ProgramHeader64<Endianness>>(
+		&mut bytes[phoff..],
+		phnum,
+	)
+	.map_err(|_| anyhow::anyhow!("invalid carrier program headers"))?;
+	let last = programs
+		.iter_mut()
+		.filter(|program| program.p_type.get(endian) == object::elf::PT_LOAD)
+		.max_by_key(|program| program.p_vaddr.get(endian))
+		.ok_or_else(|| anyhow::anyhow!("the carrier has no load segment"))?;
+	last.p_memsz.set(endian, last.p_memsz.get(endian) + extra);
+	let bss = dir.join("bss");
+	std::fs::write(&bss, bytes)?;
+	std::fs::set_permissions(&bss, std::fs::metadata(carrier())?.permissions())?;
+	Ok(bss)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_large_bss_does_not_grow_the_file() -> Result<()> {
+	const BSS: u64 = 256 << 20;
+	let scratch = tempfile::tempdir()?;
+	let main = with_bss(scratch.path(), BSS)?;
+	let item = scratch.path().join("kernel");
+	std::fs::write(&item, b"the item")?;
+	let out = scratch.path().join("packed");
+	let status = Command::new(exepack())
+		.args([
+			"--main",
+			&main.display().to_string(),
+			"--output",
+			&out.display().to_string(),
+			"--compress",
+			"none",
+			"--item",
+			&format!("kernel={}", item.display()),
+		])
+		.status()?;
+	assert!(status.success(), "the run failed: {status}");
+	let growth = std::fs::metadata(&out)?.len() - std::fs::metadata(&main)?.len();
+	assert!(
+		growth < BSS / 16,
+		"packing grew the file by {growth} bytes for a {BSS}-byte .bss"
+	);
+	Ok(())
+}
+
 #[test]
 fn a_packed_copy_reads_its_items_back() -> Result<()> {
 	let items = [
@@ -258,7 +316,7 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 			exepack::find_loaded(name)?.read_to_end(&mut bytes)?;
 			assert_eq!(bytes, expected.as_bytes(), "{name:?} did not read back");
 		}
-		// A name that was never embedded has to be reported rather than walked past the end of the records, which the padding behind them does not look like a record at all.
+		// A missing name must stop at the padding after the last record, not read past it.
 		let missing = exepack::find_loaded("never_embedded")
 			.err()
 			.expect("a missing item was not reported");
@@ -277,8 +335,8 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 		})
 		.collect::<Result<_>>()?;
 	let mains = cfg_select! {
-		target_os = "linux" => vec![carrier(), sectionless(scratch.path())?],
-		_ => vec![carrier()],
+		target_os = "linux" => [carrier(), sectionless(scratch.path())?],
+		_ => [carrier()],
 	};
 	for (index, main) in mains.iter().enumerate() {
 		for compress in [
@@ -320,25 +378,47 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 					String::from_utf8_lossy(&verification.stderr)
 				);
 			}
-			let child = Command::new(&out)
-				.env("EXEPACK_PROBE", "1")
-				.args(["--exact", "a_packed_copy_reads_its_items_back"])
-				.output()?;
-			assert!(
-				child.status.success(),
-				"the packed copy does not read its items back: {}\nstdout: {}\nstderr: {}",
-				child.status,
-				String::from_utf8_lossy(&child.stdout),
-				String::from_utf8_lossy(&child.stderr)
-			);
+			// GNU strip moves the notes and their load segment but leaves each PT_NOTE's p_vaddr behind. The probe deletes its image, so strip a copy first.
+			#[cfg(target_os = "linux")]
+			let stripped = if index == 0 && compress.is_none() {
+				let stripped = scratch.path().join(format!("{index}-stripped"));
+				std::fs::copy(&out, &stripped)?;
+				let status = Command::new("strip").arg(&stripped).status()?;
+				assert!(status.success(), "strip failed: {status}");
+				Some(stripped)
+			} else {
+				None
+			};
+			reads_back(&out)?;
+			#[cfg(target_os = "linux")]
+			if let Some(stripped) = stripped {
+				reads_back(&stripped)?;
+			}
 		}
 	}
 	Ok(())
 }
 
+/// Run `image` as a probe of `a_packed_copy_reads_its_items_back` and assert that it read every item back.
+fn reads_back(image: &std::path::Path) -> Result<()> {
+	let child = Command::new(image)
+		.env("EXEPACK_PROBE", "1")
+		.args(["--exact", "a_packed_copy_reads_its_items_back"])
+		.output()?;
+	assert!(
+		child.status.success(),
+		"{} does not read its items back: {}\nstdout: {}\nstderr: {}",
+		image.display(),
+		child.status,
+		String::from_utf8_lossy(&child.stdout),
+		String::from_utf8_lossy(&child.stderr)
+	);
+	Ok(())
+}
+
 #[cfg(target_os = "macos")]
 #[test]
-fn the_items_are_read_back_without_disturbing_the_image() -> Result<()> {
+fn packing_keeps_entitlements_and_load_commands() -> Result<()> {
 	let scratch = tempfile::tempdir()?;
 	let main = scratch.path().join("signed");
 	let entitlements = scratch.path().join("entitlements.plist");
@@ -351,7 +431,7 @@ fn the_items_are_read_back_without_disturbing_the_image() -> Result<()> {
 </dict></plist>"#,
 	)?;
 	std::fs::copy(carrier(), &main)?;
-	// The carrier is signed by the linker as it is, so it has to be signed again to carry the entitlements this test is about.
+	// The linker's ad-hoc signature has no entitlements; re-sign with some.
 	let signing = Command::new("codesign")
 		.args(["--force", "--sign", "-", "--entitlements"])
 		.arg(&entitlements)
@@ -378,7 +458,7 @@ fn the_items_are_read_back_without_disturbing_the_image() -> Result<()> {
 		.status()?;
 	assert!(status.success(), "the run failed: {status}");
 
-	// What the signer carries over from the image it was handed. `--entitlements -` writes the plist to stdout and only the path it read to stderr.
+	// The entitlements codesign prints to stdout, and the header's ncmds and sizeofcmds (offsets 16 and 20).
 	let read = |path: &std::path::Path| -> Result<(String, u32, u32)> {
 		let display = Command::new("codesign")
 			.args(["--display", "--entitlements", "-"])
@@ -403,7 +483,7 @@ fn the_items_are_read_back_without_disturbing_the_image() -> Result<()> {
 		entries.contains("com.apple.security.cs.allow-jit"),
 		"the packed copy lost its entitlements\n  input: {input_entries}\n  output: {entries}"
 	);
-	// The items ride in `__LINKEDIT`, so the load command table and every section it describes must be exactly where the carrier left them; adding a command or moving a section is what corrupts the image.
+	// Packing must not add or resize a load command.
 	assert_eq!(
 		(count, size),
 		(input_count, input_size),
@@ -429,7 +509,7 @@ fn the_output_carries_the_inputs_permissions() -> Result<()> {
 	let scratch = tempfile::tempdir()?;
 	let main = scratch.path().join("main");
 	std::fs::copy(carrier(), &main)?;
-	// A mode no default would land on, and one that no `0o755` could be mistaken for.
+	// A mode no default would land on.
 	std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o4751))?;
 	let out = scratch.path().join("packed");
 	let status = Command::new(exepack())
