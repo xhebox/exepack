@@ -35,6 +35,7 @@ jobs:
 
   test:
     name: ${{ matrix.target }}
+    needs: check
     runs-on: ${{ matrix.runs-on }}
     permissions:
       contents: read
