@@ -1,5 +1,5 @@
 //! Read back what `exepack` embedded.
 
-pub mod format;
+mod format;
 
-pub use format::{Compression, Container};
+pub use format::{Compression, Container, find_loaded};
