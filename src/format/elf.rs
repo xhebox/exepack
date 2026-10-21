@@ -65,7 +65,7 @@ pub(super) fn append(
 	let count = u16::try_from(programs.len() + 2)?;
 	ensure!(count < elf::PN_XNUM, "too many ELF program headers");
 	// The file offset follows the image, but the address skips its .bss, so the file does not grow by the size of .bss.
-	// The extra page keeps the segment clear of the last one's tail: GNU strip pulls a segment's address down by less than a page to keep it congruent with its file offset.
+	// The extra page keeps the segment clear of the last one's tail: bfd, having relaid the file, pulls this segment's address down by less than a page to keep `p_offset == p_vaddr (mod p_align)` (`vma_page_aligned_bias`), and leaves `p_paddr` behind. A writable segment would not help; only moving it clear does.
 	let table = Span {
 		offset: (image.len() as u64).next_multiple_of(page),
 		address: end
