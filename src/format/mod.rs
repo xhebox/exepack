@@ -134,13 +134,18 @@ impl FromStr for Compression {
 	}
 }
 
+/// The executable format of an image, which decides where its items are embedded.
 pub enum Container {
+	/// A new note segment maps the items into the process.
 	Elf,
+	/// The items are appended past the end of the image.
 	MachO,
+	/// One RCDATA resource per item.
 	Pe,
 }
 
 impl Container {
+	/// Identify the format of `image` from its magic bytes.
 	pub fn detect(image: &[u8]) -> Result<Self> {
 		if image.starts_with(b"\xca\xfe\xba\xbe") || image.starts_with(b"\xbe\xba\xfe\xca") {
 			bail!("a universal Mach-O image is not packed; thin it to one architecture first");
@@ -157,6 +162,7 @@ impl Container {
 		bail!("the image is neither ELF, Mach-O, nor PE")
 	}
 
+	/// Write `image` to `output` with `items` embedded in it, each compressed with `compression`.
 	pub fn append<W: Write, R: Read>(
 		&self,
 		image: &[u8],

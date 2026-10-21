@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "exepack"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "arwen-codesign",
