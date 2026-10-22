@@ -1,21 +1,21 @@
 //! The PE container: one RCDATA resource per item.
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 use anyhow::{Context, Result, bail, ensure};
 
 use editpe::constants::RT_RCDATA;
 
-use super::OrInvalid;
+use super::{Items, OrInvalid};
 
 /// Add each item to the image as a resource of its own.
 ///
 /// The resources the image already carries are kept, so a manifest or version block survives.
 ///
-/// Each item's buffer is moved into its resource.
+/// Each item is compressed into a buffer of its own, which is moved into its resource.
 pub(super) fn append(
 	image: &[u8],
-	mut items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+	mut items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
 	output: &mut impl Write,
 ) -> Result<()> {
 	let mut pe = editpe::Image::parse(image).context("parse PE")?;
@@ -31,22 +31,19 @@ pub(super) fn append(
 	let Some(editpe::ResourceEntry::Table(table)) = root.get_mut(resource_type) else {
 		bail!("the PE RCDATA resource is not a table");
 	};
-	let mut buffer = Vec::new();
-	loop {
-		buffer.clear();
-		let name = items(&mut buffer)?;
-		if name.is_empty() {
-			break;
-		}
+	while let Some((name, input)) = items.next()? {
+		let name = name.as_ref();
 		ensure!(!name.contains('\0'), "PE item name {name:?} has a NUL");
 		// Windows matches resource names case-insensitively, so names differing only in case collide.
 		let key = editpe::ResourceEntryName::try_from_string(name.to_uppercase())?;
 		if table.get(&key).is_some() {
 			bail!("PE resource name {name:?} is embedded twice");
 		}
+		let mut buffer = Vec::new();
+		items.encode(input, &mut buffer)?;
 		let mut language = editpe::ResourceTable::default();
 		let mut resource = editpe::ResourceData::default();
-		resource.set_data(std::mem::take(&mut buffer));
+		resource.set_data(buffer);
 		language.insert(
 			editpe::ResourceEntryName::ID(0),
 			editpe::ResourceEntry::Data(resource),
@@ -63,11 +60,12 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	use windows_sys::Win32::System::LibraryLoader::{
 		FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
 	};
-	let wide: Vec<u16> = name
-		.to_uppercase()
-		.encode_utf16()
-		.chain(std::iter::once(0))
-		.collect();
+	let mut wide = Vec::with_capacity(name.len() + 1);
+	let mut buf = [0; 2];
+	for ch in name.chars().flat_map(char::to_uppercase) {
+		wide.extend_from_slice(ch.encode_utf16(&mut buf));
+	}
+	wide.push(0);
 	// SAFETY: Windows owns the executable module and its mapped resources for the lifetime of the process.
 	unsafe {
 		let module = GetModuleHandleW(std::ptr::null());

@@ -11,9 +11,13 @@
 //!
 //! Each item is one note of type `NOTE_TYPE`, named after the item, whose desc is the packed item alone.
 
-use std::{io::Write, mem::size_of};
+use std::{
+	io::{self, Read, Write},
+	mem::size_of,
+	sync::OnceLock,
+};
 
-use super::OrInvalid;
+use super::{Items, OrInvalid};
 use anyhow::{Context, Result, ensure};
 use object::{
 	elf::{self, FileHeader64, NoteHeader64, ProgramHeader64, SectionHeader64},
@@ -39,7 +43,7 @@ struct Span {
 
 pub(super) fn append(
 	image: &[u8],
-	items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+	items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
 	output: &mut impl Write,
 ) -> Result<()> {
 	let mut header = *Header::parse(image)?;
@@ -76,10 +80,10 @@ pub(super) fn append(
 		align: page,
 	};
 
-	let mut built = image.to_vec();
-	built.resize(usize::try_from(table.offset + table.size)?, 0);
-	write_notes(endian, &mut built, items)?;
-	let size = built.len() as u64 - table.offset - table.size;
+	// Everything from the table on is new; the image before it is written out as it is, but for its header.
+	let mut tail = vec![0; usize::try_from(table.size)?];
+	write_notes(endian, &mut tail, items)?;
+	let size = tail.len() as u64 - table.size;
 	// The segment's end is the last address left to check, and bounds every address before it.
 	ensure!(
 		table.address.checked_add(table.size + size).is_some(),
@@ -107,44 +111,51 @@ pub(super) fn append(
 	};
 	programs.push(new_program(endian, elf::PT_LOAD, load));
 	programs.push(new_program(endian, elf::PT_NOTE, notes));
-	built[table.offset as usize..notes.offset as usize]
-		.copy_from_slice(pod::bytes_of_slice(&programs));
+	tail[..table.size as usize].copy_from_slice(pod::bytes_of_slice(&programs));
 	header.e_phoff.set(endian, table.offset);
 	header.e_phnum.set(endian, count);
 
-	add_sections(endian, &mut header, image, &mut built, table, notes)?;
-	built[..size_of::<Header>()].copy_from_slice(pod::bytes_of(&header));
-	output.write_all(&built).context("write ELF")
+	add_sections(endian, &mut header, image, &mut tail, table, notes)?;
+	let pad = table.offset - image.len() as u64;
+	(|| {
+		output.write_all(pod::bytes_of(&header))?;
+		output.write_all(&image[size_of::<Header>()..])?;
+		io::copy(&mut io::repeat(0).take(pad), output)?;
+		output.write_all(&tail)
+	})()
+	.context("write ELF")
 }
 
-/// Append each item as a note: header, NUL-terminated name, desc, each of the last two padded to 4 bytes.
+/// Append each item as a note: header, NUL-terminated name, desc, each of the last two padded to 4 bytes. `tail`
+/// starts on a page, so its offsets align as the file's do.
 fn write_notes(
 	endian: Endianness,
-	built: &mut Vec<u8>,
-	mut items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+	tail: &mut Vec<u8>,
+	mut items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
 ) -> Result<()> {
-	let mut desc = Vec::new();
-	loop {
-		desc.clear();
-		let name = items(&mut desc)?;
-		if name.is_empty() {
-			return Ok(());
-		}
+	while let Some((name, input)) = items.next()? {
+		let name = name.as_ref();
+		// The header waits for the desc size, known once the item is compressed.
+		let start = tail.len();
+		tail.resize(start + size_of::<NoteHeader64<Endianness>>(), 0);
+		tail.extend_from_slice(name.as_bytes());
+		tail.push(0);
+		tail.resize(tail.len().next_multiple_of(4), 0);
+		let desc = tail.len();
+		items.encode(input, tail)?;
 		let note = NoteHeader64 {
 			n_namesz: U32::new(
 				endian,
 				u32::try_from(name.len() + 1).context("an item name is too long")?,
 			),
-			n_descsz: U32::new(endian, u32::try_from(desc.len())?),
+			n_descsz: U32::new(endian, u32::try_from(tail.len() - desc)?),
 			n_type: U32::new(endian, NOTE_TYPE),
 		};
-		built.extend_from_slice(pod::bytes_of(&note));
-		built.extend_from_slice(name.as_bytes());
-		built.push(0);
-		built.resize(built.len().next_multiple_of(4), 0);
-		built.extend_from_slice(&desc);
-		built.resize(built.len().next_multiple_of(4), 0);
+		tail[start..start + size_of::<NoteHeader64<Endianness>>()]
+			.copy_from_slice(pod::bytes_of(&note));
+		tail.resize(tail.len().next_multiple_of(4), 0);
 	}
+	Ok(())
 }
 
 /// Cover the table and the notes with allocated sections, if the image has a section table at all: section-based
@@ -154,7 +165,7 @@ fn add_sections(
 	endian: Endianness,
 	header: &mut Header,
 	image: &[u8],
-	built: &mut Vec<u8>,
+	tail: &mut Vec<u8>,
 	table: Span,
 	notes: Span,
 ) -> Result<()> {
@@ -166,23 +177,24 @@ fn add_sections(
 	let strings = sections
 		.get_mut(index)
 		.context("invalid ELF section string table index")?;
-	let mut names = strings.data(endian, image)?.to_vec();
+	let names = strings.data(endian, image)?;
+	let start = tail.len();
 	let table_name = u32::try_from(names.len())?;
-	names.extend_from_slice(b".exepack.phdrs\0");
-	let notes_name = u32::try_from(names.len())?;
-	names.extend_from_slice(b".note.exepack\0");
-	strings.sh_offset.set(endian, built.len() as u64);
-	strings.sh_size.set(endian, names.len() as u64);
-	built.extend_from_slice(&names);
-	built.resize(built.len().next_multiple_of(8), 0);
+	tail.extend_from_slice(names);
+	tail.extend_from_slice(b".exepack.phdrs\0");
+	let notes_name = u32::try_from(tail.len() - start)?;
+	tail.extend_from_slice(b".note.exepack\0");
+	strings.sh_offset.set(endian, table.offset + start as u64);
+	strings.sh_size.set(endian, (tail.len() - start) as u64);
+	tail.resize(tail.len().next_multiple_of(8), 0);
 
 	sections.push(new_section(endian, table_name, elf::SHT_PROGBITS, table));
 	sections.push(new_section(endian, notes_name, elf::SHT_NOTE, notes));
 	let count = u16::try_from(sections.len())?;
 	ensure!(count < elf::SHN_LORESERVE, "too many ELF sections");
-	header.e_shoff.set(endian, built.len() as u64);
+	header.e_shoff.set(endian, table.offset + tail.len() as u64);
 	header.e_shnum.set(endian, count);
-	built.extend_from_slice(pod::bytes_of_slice(&sections));
+	tail.extend_from_slice(pod::bytes_of_slice(&sections));
 	Ok(())
 }
 
@@ -216,7 +228,16 @@ fn new_section(endian: Endianness, name: u32, kind: elf::SectionType, span: Span
 	}
 }
 
-pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
+#[cfg(target_pointer_width = "64")]
+type NativeHeader = FileHeader64<NativeEndian>;
+#[cfg(target_pointer_width = "32")]
+type NativeHeader = elf::FileHeader32<NativeEndian>;
+
+/// The alignment and bytes of the PT_NOTE segment that holds the items.
+type Notes = (<NativeHeader as FileHeader>::Word, &'static [u8]);
+
+/// Locate the PT_NOTE segment of the main executable.
+fn locate_notes() -> Result<Notes, super::Error> {
 	let mut image: Option<libc::dl_phdr_info> = None;
 	// The callback stops the walk with 1, so the return value is 1 exactly when libc reached it.
 	let walked = unsafe {
@@ -273,11 +294,16 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	// SAFETY: the note range was checked against the executable's file-backed load segments.
 	let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, size as usize) };
 
-	#[cfg(target_pointer_width = "64")]
-	type NativeHeader = FileHeader64<NativeEndian>;
-	#[cfg(target_pointer_width = "32")]
-	type NativeHeader = elf::FileHeader32<NativeEndian>;
-	let notes = NoteIterator::<NativeHeader>::new(NativeEndian, program.p_align, bytes)
+	Ok((program.p_align, bytes))
+}
+
+pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
+	static NOTES: OnceLock<Result<Notes, super::Error>> = OnceLock::new();
+	let (align, bytes) = *NOTES
+		.get_or_init(locate_notes)
+		.as_ref()
+		.map_err(Clone::clone)?;
+	let notes = NoteIterator::<NativeHeader>::new(NativeEndian, align, bytes)
 		.or_invalid("a PT_NOTE segment of the running image is malformed")?;
 	for note in notes {
 		let note = note.or_invalid("a note of the running image is malformed")?;
@@ -287,5 +313,7 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 		}
 	}
 
-	Err(not_found())
+	Err(super::Error::not_found(
+		"the running image carries no such item",
+	))
 }

@@ -38,14 +38,16 @@ let mut bytes = Vec::new();
 kernel.read_to_end(&mut bytes)?;
 ```
 
+An item packed with `--compress none` is mapped as it is, and `Item::as_bytes` hands its bytes over without a copy.
+
 A build that carries no such item, such as an unpacked one, fails with `ErrorKind::NotFound`, so it can fall back:
 
 ```rust
-match exepack::find_loaded("test_item") {
-    Ok(item) => item,
+let item: Box<dyn std::io::Read> = match exepack::find_loaded("test_item") {
+    Ok(item) => Box::new(item),
     Err(error) if error.kind() == exepack::ErrorKind::NotFound => Box::new(std::fs::File::open("test_item")?),
     Err(error) => return Err(error.into()),
-}
+};
 ```
 
 ## License

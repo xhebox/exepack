@@ -1,10 +1,10 @@
 use std::collections::HashSet;
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Read, Write};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
 use flate2::Compression as Level;
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
 use flate2::write::GzEncoder;
 
 mod error;
@@ -54,7 +54,7 @@ impl Compression {
 		Ok(self)
 	}
 
-	/// Compress `input` onto the end of `out`, tag first. The caller clears `out` between items.
+	/// Compress `input` onto the end of `out`, tag first.
 	fn encode(self, mut input: impl Read, out: &mut Vec<u8>) -> Result<()> {
 		out.push(self.tag());
 		match self {
@@ -83,26 +83,59 @@ impl Compression {
 		}
 		Ok(())
 	}
+}
 
-	fn decode<'a>(stored: &'a [u8]) -> Result<Box<dyn Read + 'a>, Error> {
+/// An embedded item, decompressed as it is read.
+pub struct Item(Decoder);
+
+enum Decoder {
+	None(&'static [u8]),
+	// The slice is its own buffer, so gzip reads it in place.
+	Gzip(GzDecoder<&'static [u8]>),
+	Brotli(Box<brotli::Decompressor<&'static [u8]>>),
+	Zstd(Box<ruzstd::decoding::StreamingDecoder<&'static [u8], ruzstd::decoding::FrameDecoder>>),
+}
+
+impl Item {
+	fn decode(stored: &'static [u8]) -> Result<Self, Error> {
 		let (&tag, data) = stored
 			.split_first()
 			.or_invalid("the item carries no compression tag")?;
-		let reader = Cursor::new(data);
-		Ok(match tag {
-			0 => Box::new(reader),
-			1 => Box::new(GzDecoder::new(reader)),
-			2 => Box::new(brotli::Decompressor::new(reader, 4096)),
-			3 => Box::new(
-				ruzstd::decoding::StreamingDecoder::new(reader)
+		Ok(Self(match tag {
+			0 => Decoder::None(data),
+			1 => Decoder::Gzip(GzDecoder::new(data)),
+			2 => Decoder::Brotli(Box::new(brotli::Decompressor::new(data, 4096))),
+			3 => Decoder::Zstd(Box::new(
+				ruzstd::decoding::StreamingDecoder::new(data)
 					.or_invalid("the zstd frame header is malformed")?,
-			),
+			)),
 			_ => {
 				return Err(Error::invalid(format!(
 					"the item is compressed under tag {tag}, which this build does not know; a newer exepack stored it"
 				)));
 			}
-		})
+		}))
+	}
+
+	/// The bytes of an item stored uncompressed, which the running image maps, or `None` if it was compressed.
+	///
+	/// Only the bytes not yet read are returned.
+	pub fn as_bytes(&self) -> Option<&'static [u8]> {
+		match self.0 {
+			Decoder::None(data) => Some(data),
+			_ => None,
+		}
+	}
+}
+
+impl Read for Item {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		match &mut self.0 {
+			Decoder::None(data) => data.read(buf),
+			Decoder::Gzip(decoder) => decoder.read(buf),
+			Decoder::Brotli(decoder) => decoder.read(buf),
+			Decoder::Zstd(decoder) => decoder.read(buf),
+		}
 	}
 }
 
@@ -163,37 +196,55 @@ impl Container {
 	}
 
 	/// Write `image` to `output` with `items` embedded in it, each compressed with `compression`.
-	pub fn append<W: Write, R: Read>(
+	pub fn append<N: AsRef<str>, R: Read>(
 		&self,
 		image: &[u8],
-		items: impl IntoIterator<Item = (String, R)>,
+		items: impl IntoIterator<Item = (N, R)>,
 		compression: Compression,
-		output: &mut W,
+		output: &mut impl Write,
 	) -> Result<()> {
-		let mut items = items.into_iter();
-		let mut names = HashSet::new();
-		// Compress the next item into `out`, which the caller clears and reuses, and return its name; an empty name means no items are left.
-		let store = |out: &mut Vec<u8>| -> Result<String> {
-			let Some((name, input)) = items.next() else {
-				return Ok(String::new());
-			};
-			ensure!(!name.is_empty(), "item name cannot be empty");
-			if !names.insert(name.clone()) {
-				bail!("item name {name:?} is embedded twice");
-			}
-			compression.encode(input, out)?;
-			Ok(name)
+		let items = Items {
+			items: items.into_iter(),
+			names: HashSet::new(),
+			compression,
 		};
-
 		match self {
 			#[cfg(target_os = "linux")]
-			Self::Elf => elf::append(image, store, output),
+			Self::Elf => elf::append(image, items, output),
 			#[cfg(target_os = "macos")]
-			Self::MachO => macho::append(image, store, output),
+			Self::MachO => macho::append(image, items, output),
 			#[cfg(target_os = "windows")]
-			Self::Pe => pe::append(image, store, output),
+			Self::Pe => pe::append(image, items, output),
 			_ => bail!("embedding items in this image requires the platform it targets"),
 		}
+	}
+}
+
+/// The items left to embed. Each container writes an item's header before its bytes, so the name comes first and the
+/// bytes are compressed straight into the container after it.
+struct Items<I> {
+	items: I,
+	names: HashSet<String>,
+	compression: Compression,
+}
+
+impl<N: AsRef<str>, R: Read, I: Iterator<Item = (N, R)>> Items<I> {
+	/// The next item, its name checked, or `None` once none are left.
+	fn next(&mut self) -> Result<Option<(N, R)>> {
+		let Some((name, input)) = self.items.next() else {
+			return Ok(None);
+		};
+		let text = name.as_ref();
+		ensure!(!text.is_empty(), "item name cannot be empty");
+		if !self.names.insert(text.to_owned()) {
+			bail!("item name {text:?} is embedded twice");
+		}
+		Ok(Some((name, input)))
+	}
+
+	/// Compress `input` onto the end of `out`.
+	fn encode(&self, input: R, out: &mut Vec<u8>) -> Result<()> {
+		self.compression.encode(input, out)
 	}
 }
 
@@ -201,7 +252,7 @@ impl Container {
 ///
 /// Fails with [`ErrorKind::NotFound`] if the running image carries no such item, and with [`ErrorKind::Invalid`] if it
 /// cannot be read back.
-pub fn find_loaded(name: &str) -> Result<Box<dyn Read + '_>, Error> {
+pub fn find_loaded(name: &str) -> Result<Item, Error> {
 	let found = cfg_select! {
 		target_os = "linux" => elf::find(name),
 		target_os = "macos" => macho::find(name),
@@ -211,6 +262,6 @@ pub fn find_loaded(name: &str) -> Result<Box<dyn Read + '_>, Error> {
 		)),
 	};
 	found
-		.and_then(Compression::decode)
+		.and_then(Item::decode)
 		.map_err(|error| error.named(name))
 }
