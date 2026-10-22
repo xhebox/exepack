@@ -26,7 +26,7 @@ fn main() -> Result<()> {
 	let args = Cli::parse();
 
 	// Check every name before reading any item.
-	let mut named: Vec<(String, PathBuf)> = Vec::with_capacity(args.items.len());
+	let mut named: Vec<(&str, &str)> = Vec::with_capacity(args.items.len());
 	for spec in &args.items {
 		let (name, path) = spec
 			.split_once('=')
@@ -34,33 +34,32 @@ fn main() -> Result<()> {
 		if name.is_empty() {
 			bail!("item name cannot be empty");
 		}
-		if named.iter().any(|(seen, _)| seen.as_str() == name) {
+		if named.iter().any(|&(seen, _)| seen == name) {
 			bail!("item name {name:?} is embedded twice");
 		}
-		named.push((name.to_owned(), PathBuf::from(path)));
+		named.push((name, path));
 	}
 
 	let mut items = Vec::with_capacity(named.len());
-	for (name, path) in &named {
-		let file = std::fs::File::open(path)
-			.with_context(|| format!("open item {name} from {}", path.display()))?;
-		items.push((name.to_owned(), file));
+	for (name, path) in named {
+		let file =
+			std::fs::File::open(path).with_context(|| format!("open item {name} from {path}"))?;
+		items.push((name, file));
 	}
 
 	let mut image = std::fs::File::open(&args.main)
 		.with_context(|| format!("open the main executable {}", args.main.display()))?;
+	let metadata = image
+		.metadata()
+		.with_context(|| format!("read the metadata of {}", args.main.display()))?;
 	// The output copy carries the permissions of the executable it was read from, setuid and setgid included.
 	#[cfg(unix)]
 	let mode = {
 		use std::os::unix::fs::PermissionsExt;
-		image
-			.metadata()
-			.with_context(|| format!("read the mode of {}", args.main.display()))?
-			.permissions()
-			.mode()
-			& 0o7777
+		metadata.permissions().mode() & 0o7777
 	};
-	let mut bytes = Vec::new();
+	let mut bytes =
+		Vec::with_capacity(usize::try_from(metadata.len()).map_or(0, |len| len.saturating_add(1)));
 	image
 		.read_to_end(&mut bytes)
 		.context("read the main executable")?;

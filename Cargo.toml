@@ -1,6 +1,6 @@
 [package]
 name = "exepack"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 description = "Embed items into an executable's own container, one per item, with optional compression."
 license = "MIT"

@@ -11,9 +11,13 @@
 //!
 //! Both lengths come before the name, so one record can be stepped over using its ten byte header.
 
-use std::{io::Write, mem::size_of};
+use std::{
+	io::{Read, Write},
+	mem::size_of,
+	sync::OnceLock,
+};
 
-use super::OrInvalid;
+use super::{Items, OrInvalid};
 use anyhow::{Context, Result, ensure};
 use object::{
 	endian::LittleEndian,
@@ -38,7 +42,7 @@ const RECORD_LEN: usize = 2 + 8;
 /// Each item is one record of its own, named in the record rather than by a load command, because a Mach-O section name is 16 bytes at most and every added load command would move the sections behind it.
 pub(super) fn append(
 	image: &[u8],
-	items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+	items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
 	output: &mut impl Write,
 ) -> Result<()> {
 	let header = MachHeader64::<LittleEndian>::parse(image, 0)?;
@@ -86,25 +90,26 @@ pub(super) fn append(
 /// Append each item as a record: name length, data length, name, data.
 fn write_records(
 	built: &mut Vec<u8>,
-	mut items: impl FnMut(&mut Vec<u8>) -> Result<String>,
+	mut items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
 ) -> Result<()> {
-	let mut data = Vec::new();
-	loop {
-		data.clear();
-		let name = items(&mut data)?;
-		if name.is_empty() {
-			return Ok(());
-		}
+	while let Some((name, input)) = items.next()? {
+		let name = name.as_ref();
 		let name_len = u16::try_from(name.len()).context("an item name is too long")?;
 		built.extend_from_slice(&name_len.to_le_bytes());
-		built.extend_from_slice(&u64::try_from(data.len())?.to_le_bytes());
+		// The data length waits for the item to be compressed.
+		let data_len = built.len();
+		built.extend_from_slice(&[0; 8]);
 		built.extend_from_slice(name.as_bytes());
-		built.extend_from_slice(&data);
+		let data = built.len();
+		items.encode(input, built)?;
+		let len = u64::try_from(built.len() - data)?;
+		built[data_len..data_len + 8].copy_from_slice(&len.to_le_bytes());
 	}
+	Ok(())
 }
 
-/// The bytes stored under `name` in the running image.
-pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
+/// The records the running image's payload carries behind the marker. Only the first call walks the load commands.
+fn locate_records() -> Result<&'static [u8], super::Error> {
 	// SAFETY: image 0 is the running executable, whose headers stay mapped for the life of the process.
 	let pointer = unsafe { _dyld_get_image_header(0) };
 	if pointer.is_null() {
@@ -165,10 +170,19 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	let payload = unsafe { std::slice::from_raw_parts(address as *const u8, end) };
 
 	let start = payload
-		.windows(MARKER.len())
-		.position(|bytes| bytes == MARKER)
+		.chunks(ALIGN)
+		.position(|chunk| chunk.starts_with(MARKER))
 		.ok_or_else(|| super::Error::not_found("the running image carries no items"))?;
-	let mut records = &payload[start + MARKER.len()..];
+	Ok(&payload[start * ALIGN + MARKER.len()..])
+}
+
+/// The bytes stored under `name` in the running image.
+pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
+	static RECORDS: OnceLock<Result<&'static [u8], super::Error>> = OnceLock::new();
+	let mut records = *RECORDS
+		.get_or_init(locate_records)
+		.as_ref()
+		.map_err(Clone::clone)?;
 	while let Some((header, body)) = records.split_first_chunk::<RECORD_LEN>() {
 		let [name_0, name_1, data_len @ ..] = *header;
 		let name_len = usize::from(u16::from_le_bytes([name_0, name_1]));

@@ -312,8 +312,13 @@ fn a_packed_copy_reads_its_items_back() -> Result<()> {
 		#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 		std::fs::remove_file(std::env::current_exe()?)?;
 		for (name, expected) in items {
+			let mut item = exepack::find_loaded(name)?;
+			// Only an item packed with `--compress none` lends its bytes.
+			if let Some(stored) = item.as_bytes() {
+				assert_eq!(stored, expected.as_bytes(), "{name:?} is stored wrong");
+			}
 			let mut bytes = Vec::new();
-			exepack::find_loaded(name)?.read_to_end(&mut bytes)?;
+			item.read_to_end(&mut bytes)?;
 			assert_eq!(bytes, expected.as_bytes(), "{name:?} did not read back");
 		}
 		// A missing name must stop at the padding after the last record, not read past it.

@@ -1,14 +1,14 @@
-use std::fmt;
+use std::{borrow::Cow, fmt, sync::Arc};
 
 /// Why [`find_loaded`](crate::find_loaded) could not hand an item back.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Error {
 	kind: ErrorKind,
 	/// The item asked for.
 	name: String,
 	/// What went wrong.
-	message: String,
-	source: Option<Box<dyn std::error::Error + Send + Sync>>,
+	message: Cow<'static, str>,
+	source: Option<Arc<dyn std::error::Error + Send + Sync>>,
 }
 
 /// What the caller can do about an [`Error`].
@@ -32,7 +32,7 @@ impl Error {
 		&self.name
 	}
 
-	pub(super) fn not_found(message: impl Into<String>) -> Self {
+	pub(super) fn not_found(message: impl Into<Cow<'static, str>>) -> Self {
 		Self {
 			kind: ErrorKind::NotFound,
 			name: String::new(),
@@ -41,7 +41,7 @@ impl Error {
 		}
 	}
 
-	pub(super) fn invalid(message: impl Into<String>) -> Self {
+	pub(super) fn invalid(message: impl Into<Cow<'static, str>>) -> Self {
 		Self {
 			kind: ErrorKind::Invalid,
 			..Self::not_found(message)
@@ -71,20 +71,20 @@ impl std::error::Error for Error {
 
 /// Turn a failed step of reading the running image into an [`ErrorKind::Invalid`] that says which step it was.
 pub(super) trait OrInvalid<T> {
-	fn or_invalid(self, message: &str) -> Result<T, Error>;
+	fn or_invalid(self, message: &'static str) -> Result<T, Error>;
 }
 
 impl<T, E: std::error::Error + Send + Sync + 'static> OrInvalid<T> for Result<T, E> {
-	fn or_invalid(self, message: &str) -> Result<T, Error> {
+	fn or_invalid(self, message: &'static str) -> Result<T, Error> {
 		self.map_err(|source| Error {
-			source: Some(Box::new(source)),
+			source: Some(Arc::new(source)),
 			..Error::invalid(message)
 		})
 	}
 }
 
 impl<T> OrInvalid<T> for Option<T> {
-	fn or_invalid(self, message: &str) -> Result<T, Error> {
+	fn or_invalid(self, message: &'static str) -> Result<T, Error> {
 		self.ok_or_else(|| Error::invalid(message))
 	}
 }
