@@ -8,8 +8,6 @@ permissions:
   contents: read
 
 env:
-  # Where task dist keeps release tarballs; OCI wants it lowercase, as this repository's name is.
-  OCI_REPOSITORY: ghcr.io/${{ github.repository }}
   # Task's builtin tar on Windows has no -z; use the runner's.
   TASK_CORE_UTILS: 'false'
 
@@ -17,9 +15,6 @@ jobs:
   dist:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -35,8 +30,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up task and oras
-        uses: ./.github/actions/setup-task-oras
+      - uses: arduino/setup-task@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: Install rust
         uses: actions-rust-lang/setup-rust-toolchain@v2
@@ -46,25 +42,25 @@ jobs:
           rustflags: ""
           cache-shared-key: cargo-${{ runner.os }}-${{ runner.arch }}
 
-      # Usually pulls what the pull request pushed; a fork's pull request could not push, so this builds and pushes it.
-      - name: Dist
-        run: task dist TARGET=${{ matrix.target }} PUSH=1
+      - name: Build
+        run: task build TARGET=${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: exepack-${{ matrix.target }}
+          path: dist/exepack-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
 
   release:
     needs: dist
     runs-on: ubuntu-26.04
     permissions:
       contents: write
-      packages: read
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up task and oras
-        uses: ./.github/actions/setup-task-oras
-
-      # Every target is in the registry now; this only pulls.
-      - name: Dist
-        run: task dists PUSH=0
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish
         uses: softprops/action-gh-release@v3

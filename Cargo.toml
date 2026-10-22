@@ -1,6 +1,6 @@
 [package]
 name = "exepack"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2024"
 description = "Embed items into an executable's own container, one per item, with optional compression."
 license = "MIT"
@@ -35,3 +35,13 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [lints.rust]
 unreachable_pub = "deny"
+let_underscore_drop = "deny"
+
+[lints.cargo]
+unused_dependencies = "deny"
+
+[lints.clippy]
+disallowed_methods = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+wildcard_imports = "deny"
