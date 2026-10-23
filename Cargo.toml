@@ -1,6 +1,6 @@
 [package]
 name = "exepack"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2024"
 description = "Embed items into an executable's own container, one per item, with optional compression."
 license = "MIT"
@@ -11,14 +11,23 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-
 pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
 
+[features]
+default = ["lz4", "gzip", "brotli"]
+lz4 = ["dep:lz4_flex"]
+gzip = ["dep:flate2"]
+brotli = ["dep:brotli"]
+
 [dependencies]
 anyhow = "1"
-brotli = "9"
+brotli = { version = "9", optional = true }
 clap = { version = "4.6", features = ["derive"] }
-flate2 = "1.1"
-ruzstd = "0.9"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+lz4_flex = { version = "0.14", default-features = false, features = ["frame"], optional = true }
 
 [dev-dependencies]
+assert2 = "0.4"
+insta = "1.49"
+rstest = { version = "0.28", default-features = false }
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -34,14 +43,21 @@ editpe = "0.2.4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 [lints.rust]
-unreachable_pub = "deny"
 let_underscore_drop = "deny"
+unreachable_pub = "deny"
+unused_qualifications = "deny"
 
 [lints.cargo]
 unused_dependencies = "deny"
 
 [lints.clippy]
+dbg_macro = "deny"
 disallowed_methods = "deny"
+len_without_is_empty = "allow"
+len_zero = "allow"
 print_stderr = "deny"
 print_stdout = "deny"
+pub_underscore_fields = "deny"
+redundant_pub_crate = "deny"
+tabs_in_doc_comments = "allow"
 wildcard_imports = "deny"

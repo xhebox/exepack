@@ -32,7 +32,7 @@ impl Error {
 		&self.name
 	}
 
-	pub(super) fn not_found(message: impl Into<Cow<'static, str>>) -> Self {
+	pub(crate) fn not_found(message: impl Into<Cow<'static, str>>) -> Self {
 		Self {
 			kind: ErrorKind::NotFound,
 			name: String::new(),
@@ -41,7 +41,7 @@ impl Error {
 		}
 	}
 
-	pub(super) fn invalid(message: impl Into<Cow<'static, str>>) -> Self {
+	pub(crate) fn invalid(message: impl Into<Cow<'static, str>>) -> Self {
 		Self {
 			kind: ErrorKind::Invalid,
 			..Self::not_found(message)
@@ -49,16 +49,28 @@ impl Error {
 	}
 
 	/// Set the name of the item the error is about.
-	pub(super) fn named(self, name: &str) -> Self {
+	pub(crate) fn named(self, name: &str) -> Self {
 		Self {
 			name: name.to_owned(),
 			..self
+		}
+	}
+
+	pub(crate) fn read_failed(name: &str, source: std::io::Error) -> Self {
+		Self {
+			kind: ErrorKind::Invalid,
+			name: name.to_owned(),
+			message: source.to_string().into(),
+			source: Some(Arc::new(source)),
 		}
 	}
 }
 
 impl fmt::Display for Error {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		if self.name.is_empty() {
+			return self.message.fmt(f);
+		}
 		write!(f, "item {:?}: {}", self.name, self.message)
 	}
 }
@@ -70,7 +82,8 @@ impl std::error::Error for Error {
 }
 
 /// Turn a failed step of reading the running image into an [`ErrorKind::Invalid`] that says which step it was.
-pub(super) trait OrInvalid<T> {
+#[expect(clippy::redundant_pub_crate)]
+pub(crate) trait OrInvalid<T> {
 	fn or_invalid(self, message: &'static str) -> Result<T, Error>;
 }
 

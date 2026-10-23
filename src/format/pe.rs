@@ -1,12 +1,14 @@
 //! The PE container: one RCDATA resource per item.
 
+use std::borrow::Cow;
 use std::io::{Read, Write};
 
 use anyhow::{Context, Result, bail, ensure};
 
 use editpe::constants::RT_RCDATA;
 
-use super::{Items, OrInvalid};
+use super::Compression;
+use crate::error::{Error, OrInvalid};
 
 /// Add each item to the image as a resource of its own.
 ///
@@ -15,7 +17,8 @@ use super::{Items, OrInvalid};
 /// Each item is compressed into a buffer of its own, which is moved into its resource.
 pub(super) fn append(
 	image: &[u8],
-	mut items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
+	items: impl Iterator<Item = (impl AsRef<str>, impl Read)>,
+	compression: Compression,
 	output: &mut impl Write,
 ) -> Result<()> {
 	let mut pe = editpe::Image::parse(image).context("parse PE")?;
@@ -31,7 +34,7 @@ pub(super) fn append(
 	let Some(editpe::ResourceEntry::Table(table)) = root.get_mut(resource_type) else {
 		bail!("the PE RCDATA resource is not a table");
 	};
-	while let Some((name, input)) = items.next()? {
+	for (name, input) in items {
 		let name = name.as_ref();
 		ensure!(!name.contains('\0'), "PE item name {name:?} has a NUL");
 		// Windows matches resource names case-insensitively, so names differing only in case collide.
@@ -40,7 +43,7 @@ pub(super) fn append(
 			bail!("PE resource name {name:?} is embedded twice");
 		}
 		let mut buffer = Vec::new();
-		items.encode(input, &mut buffer)?;
+		compression.encode(input, &mut buffer)?;
 		let mut language = editpe::ResourceTable::default();
 		let mut resource = editpe::ResourceData::default();
 		resource.set_data(buffer);
@@ -56,7 +59,7 @@ pub(super) fn append(
 }
 
 /// The bytes stored as the `name` resource of the running module.
-pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
+pub(super) fn find(name: &str) -> Result<(Option<Cow<'static, str>>, &'static [u8]), Error> {
 	use windows_sys::Win32::System::LibraryLoader::{
 		FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
 	};
@@ -75,9 +78,7 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 		}
 		let resource = FindResourceW(module, wide.as_ptr(), RT_RCDATA as usize as *const u16);
 		if resource.is_null() {
-			return Err(super::Error::not_found(
-				"the running image carries no such item",
-			));
+			return Err(Error::not_found("the running image carries no such item"));
 		}
 		let size = SizeofResource(module, resource) as usize;
 		let data = LoadResource(module, resource);
@@ -90,6 +91,7 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 			return Err(std::io::Error::last_os_error())
 				.or_invalid("the item resource cannot be mapped");
 		}
-		Ok(std::slice::from_raw_parts(ptr.cast::<u8>(), size))
+		let data = std::slice::from_raw_parts(ptr.cast::<u8>(), size);
+		Ok((Some(Cow::Owned(name.to_owned())), data))
 	}
 }

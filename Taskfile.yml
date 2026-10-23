@@ -23,6 +23,63 @@ tasks:
     cmds:
       - cargo nextest run --locked {{.CLI_ARGS}}
 
+  fixtures:
+    internal: true
+    silent: true
+    cmds:
+      - |
+        dir=target/bench
+        mkdir -p "$dir"
+        [ -s "$dir/text" ] || awk 'BEGIN { for (i = 0; i < 12500; i++) printf "{\"id\":%d,\"hash\":\"%08x%08x\",\"name\":\"asset-%d\",\"kind\":\"script\"}\n", i, (i * 2654435761) % 4294967296, (i * 40503) % 4294967296, i }' > "$dir/text"
+        [ -s "$dir/noise" ] || head -c 524288 /dev/urandom > "$dir/noise"
+        [ -s "$dir/tiny" ] || head -c 1024 /dev/urandom > "$dir/tiny"
+
+  pack-time:
+    desc: "Time a whole pack per compression, and the memory it peaks at; needs hyperfine"
+    silent: true
+    deps: [fixtures]
+    cmds:
+      - cargo build --release --locked
+      - |
+        exe=target/release/exepack
+        dir=target/bench
+        hyperfine --prepare "rm -f $dir/out" \
+          "$exe --main $exe --output $dir/out --compress none --item text=$dir/text --item noise=$dir/noise" \
+          "$exe --main $exe --output $dir/out --compress lz4 --item text=$dir/text --item noise=$dir/noise" \
+          "$exe --main $exe --output $dir/out --compress gzip:1 --item text=$dir/text --item noise=$dir/noise" \
+          "$exe --main $exe --output $dir/out --compress gzip:6 --item text=$dir/text --item noise=$dir/noise" \
+          "$exe --main $exe --output $dir/out --compress gzip:9 --item text=$dir/text --item noise=$dir/noise" \
+          "$exe --main $exe --output $dir/out --compress brotli:5 --item text=$dir/text --item noise=$dir/noise" \
+          "$exe --main $exe --output $dir/out --compress brotli:11 --item text=$dir/text --item noise=$dir/noise" \
+          {{.CLI_ARGS}}
+
+  find-time:
+    desc: "Time a process that looks an item up, unpacked and packed, and a miss that walks the whole segment; needs hyperfine"
+    silent: true
+    deps: [fixtures]
+    cmds:
+      - |
+        cargo build --release --locked --bin exepack --example probe
+        exe=target/release/exepack
+        probe=target/release/examples/probe
+        dir=target/bench
+        for spec in none lz4 gzip:6 brotli:11; do
+          "$exe" --main "$probe" --output "$dir/probe-${spec%%:*}" --compress "$spec" \
+            --item text="$dir/text" --item noise="$dir/noise"
+        done
+        "$exe" --main "$probe" --output "$dir/probe-many" --compress none \
+          --item a="$dir/tiny" --item b="$dir/tiny" --item c="$dir/tiny" --item d="$dir/tiny" \
+          --item e="$dir/tiny" --item f="$dir/tiny" --item g="$dir/tiny" --item text="$dir/text"
+        hyperfine -N --warmup 5 \
+          "$probe missing" \
+          "$dir/probe-none missing" \
+          "$dir/probe-none text" \
+          "$dir/probe-many text" \
+          "$dir/probe-lz4 text" \
+          "$dir/probe-gzip text" \
+          "$dir/probe-brotli text" \
+          {{.CLI_ARGS}}
+
   build:
     desc: "Build the release tarball for TARGET into dist/"
     requires:
