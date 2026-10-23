@@ -12,12 +12,14 @@
 //! Each item is one note of type `NOTE_TYPE`, named after the item, whose desc is the packed item alone.
 
 use std::{
+	borrow::Cow,
 	io::{self, Read, Write},
 	mem::size_of,
 	sync::OnceLock,
 };
 
-use super::{Items, OrInvalid};
+use super::Compression;
+use crate::error::{Error, OrInvalid};
 use anyhow::{Context, Result, ensure};
 use object::{
 	elf::{self, FileHeader64, NoteHeader64, ProgramHeader64, SectionHeader64},
@@ -43,7 +45,8 @@ struct Span {
 
 pub(super) fn append(
 	image: &[u8],
-	items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
+	items: impl Iterator<Item = (impl AsRef<str>, impl Read)>,
+	compression: Compression,
 	output: &mut impl Write,
 ) -> Result<()> {
 	let mut header = *Header::parse(image)?;
@@ -82,7 +85,7 @@ pub(super) fn append(
 
 	// Everything from the table on is new; the image before it is written out as it is, but for its header.
 	let mut tail = vec![0; usize::try_from(table.size)?];
-	write_notes(endian, &mut tail, items)?;
+	write_notes(endian, &mut tail, items, compression)?;
 	let size = tail.len() as u64 - table.size;
 	// The segment's end is the last address left to check, and bounds every address before it.
 	ensure!(
@@ -131,9 +134,10 @@ pub(super) fn append(
 fn write_notes(
 	endian: Endianness,
 	tail: &mut Vec<u8>,
-	mut items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
+	items: impl Iterator<Item = (impl AsRef<str>, impl Read)>,
+	compression: Compression,
 ) -> Result<()> {
-	while let Some((name, input)) = items.next()? {
+	for (name, input) in items {
 		let name = name.as_ref();
 		// The header waits for the desc size, known once the item is compressed.
 		let start = tail.len();
@@ -142,7 +146,7 @@ fn write_notes(
 		tail.push(0);
 		tail.resize(tail.len().next_multiple_of(4), 0);
 		let desc = tail.len();
-		items.encode(input, tail)?;
+		compression.encode(input, tail)?;
 		let note = NoteHeader64 {
 			n_namesz: U32::new(
 				endian,
@@ -237,7 +241,7 @@ type NativeHeader = elf::FileHeader32<NativeEndian>;
 type Notes = (<NativeHeader as FileHeader>::Word, &'static [u8]);
 
 /// Locate the PT_NOTE segment of the main executable.
-fn locate_notes() -> Result<Notes, super::Error> {
+fn locate_notes() -> Result<Notes, Error> {
 	let mut image: Option<libc::dl_phdr_info> = None;
 	// The callback stops the walk with 1, so the return value is 1 exactly when libc reached it.
 	let walked = unsafe {
@@ -259,7 +263,7 @@ fn locate_notes() -> Result<Notes, super::Error> {
 	};
 	let Some(image) = image else {
 		// A zero means the callback never ran: libc walked no image at all.
-		return Err(super::Error::not_found(format!(
+		return Err(Error::not_found(format!(
 			"the running image carries no such item, and libc described no image: dl_iterate_phdr returned {walked}"
 		)));
 	};
@@ -268,7 +272,7 @@ fn locate_notes() -> Result<Notes, super::Error> {
 	let programs =
 		unsafe { std::slice::from_raw_parts(image.dlpi_phdr, usize::from(image.dlpi_phnum)) };
 	let base = image.dlpi_addr as usize;
-	let not_found = || super::Error::not_found("the running image carries no such item");
+	let not_found = || Error::not_found("the running image carries no such item");
 	// `append` pushes its PT_LOAD and PT_NOTE after the existing ones, so ours are the last of each.
 	let (Some(load), Some(program)) = (
 		programs.iter().rfind(|p| p.p_type == libc::PT_LOAD),
@@ -297,8 +301,8 @@ fn locate_notes() -> Result<Notes, super::Error> {
 	Ok((program.p_align, bytes))
 }
 
-pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
-	static NOTES: OnceLock<Result<Notes, super::Error>> = OnceLock::new();
+pub(super) fn find(name: &str) -> Result<(Option<Cow<'static, str>>, &'static [u8]), Error> {
+	static NOTES: OnceLock<Result<Notes, Error>> = OnceLock::new();
 	let (align, bytes) = *NOTES
 		.get_or_init(locate_notes)
 		.as_ref()
@@ -308,12 +312,73 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 	for note in notes {
 		let note = note.or_invalid("a note of the running image is malformed")?;
 		// The type comes first: the notes of the running image are not all ours, and a note by another tool could bear the name we are after.
-		if note.n_type(NativeEndian) == NOTE_TYPE && note.name() == name.as_bytes() {
-			return Ok(note.desc());
+		let stored = std::str::from_utf8(note.name()).ok();
+		if note.n_type(NativeEndian) == NOTE_TYPE && stored == Some(name) {
+			return Ok((stored.map(Cow::Borrowed), note.desc()));
 		}
 	}
 
-	Err(super::Error::not_found(
-		"the running image carries no such item",
-	))
+	Err(Error::not_found("the running image carries no such item"))
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::{Compression, Container};
+	use anyhow::{Result, anyhow};
+	use assert2::check;
+	use object::{
+		elf::{FileHeader64, PT_LOAD, ProgramHeader64},
+		endian::Endianness,
+		pod,
+		read::elf::FileHeader,
+	};
+
+	#[test]
+	fn an_item_name_may_match_a_native_section() -> Result<()> {
+		let main = std::fs::read(std::env::current_exe()?)?;
+		Container::Elf.append(
+			&main,
+			[(".text", &b"the item"[..])],
+			Compression::None,
+			&mut Vec::new(),
+		)?;
+		Ok(())
+	}
+
+	fn with_bss(extra: u64) -> Result<Vec<u8>> {
+		let mut bytes = std::fs::read(std::env::current_exe()?)?;
+		let endian = FileHeader64::<Endianness>::parse(bytes.as_slice())?.endian()?;
+		let (header, _) = pod::from_bytes::<FileHeader64<Endianness>>(&bytes)
+			.map_err(|_| anyhow!("invalid carrier header"))?;
+		let (phoff, phnum) = (
+			usize::try_from(header.e_phoff.get(endian))?,
+			usize::from(header.e_phnum.get(endian)),
+		);
+		let (programs, _) =
+			pod::slice_from_bytes_mut::<ProgramHeader64<Endianness>>(&mut bytes[phoff..], phnum)
+				.map_err(|_| anyhow!("invalid carrier program headers"))?;
+		let last = programs
+			.iter_mut()
+			.filter(|program| program.p_type.get(endian) == PT_LOAD)
+			.max_by_key(|program| program.p_vaddr.get(endian))
+			.ok_or_else(|| anyhow!("the carrier has no load segment"))?;
+		last.p_memsz.set(endian, last.p_memsz.get(endian) + extra);
+		Ok(bytes)
+	}
+
+	#[test]
+	fn a_large_bss_does_not_grow_the_file() -> Result<()> {
+		const BSS: u64 = 256 << 20;
+		let main = with_bss(BSS)?;
+		let mut out = Vec::new();
+		Container::Elf.append(
+			&main,
+			[("kernel", &b"the item"[..])],
+			Compression::None,
+			&mut out,
+		)?;
+		let growth = u64::try_from(out.len() - main.len())?;
+		check!(growth < BSS / 16);
+		Ok(())
+	}
 }

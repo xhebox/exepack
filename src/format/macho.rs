@@ -12,12 +12,14 @@
 //! Both lengths come before the name, so one record can be stepped over using its ten byte header.
 
 use std::{
+	borrow::Cow,
 	io::{Read, Write},
 	mem::size_of,
 	sync::OnceLock,
 };
 
-use super::{Items, OrInvalid};
+use super::Compression;
+use crate::error::{Error, OrInvalid};
 use anyhow::{Context, Result, ensure};
 use object::{
 	endian::LittleEndian,
@@ -42,7 +44,8 @@ const RECORD_LEN: usize = 2 + 8;
 /// Each item is one record of its own, named in the record rather than by a load command, because a Mach-O section name is 16 bytes at most and every added load command would move the sections behind it.
 pub(super) fn append(
 	image: &[u8],
-	items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
+	items: impl Iterator<Item = (impl AsRef<str>, impl Read)>,
+	compression: Compression,
 	output: &mut impl Write,
 ) -> Result<()> {
 	let header = MachHeader64::<LittleEndian>::parse(image, 0)?;
@@ -67,7 +70,7 @@ pub(super) fn append(
 	let mut built = image.to_vec();
 	built.resize(built.len().next_multiple_of(ALIGN), 0);
 	built.extend_from_slice(MARKER);
-	write_records(&mut built, items)?;
+	write_records(&mut built, items, compression)?;
 	built.resize(built.len().next_multiple_of(ALIGN), 0);
 	// Point the signature past the payload; signing grows `__LINKEDIT` up to it.
 	let dataoff = u32::try_from(built.len())?;
@@ -90,9 +93,10 @@ pub(super) fn append(
 /// Append each item as a record: name length, data length, name, data.
 fn write_records(
 	built: &mut Vec<u8>,
-	mut items: Items<impl Iterator<Item = (impl AsRef<str>, impl Read)>>,
+	items: impl Iterator<Item = (impl AsRef<str>, impl Read)>,
+	compression: Compression,
 ) -> Result<()> {
-	while let Some((name, input)) = items.next()? {
+	for (name, input) in items {
 		let name = name.as_ref();
 		let name_len = u16::try_from(name.len()).context("an item name is too long")?;
 		built.extend_from_slice(&name_len.to_le_bytes());
@@ -101,7 +105,7 @@ fn write_records(
 		built.extend_from_slice(&[0; 8]);
 		built.extend_from_slice(name.as_bytes());
 		let data = built.len();
-		items.encode(input, built)?;
+		compression.encode(input, built)?;
 		let len = u64::try_from(built.len() - data)?;
 		built[data_len..data_len + 8].copy_from_slice(&len.to_le_bytes());
 	}
@@ -109,18 +113,16 @@ fn write_records(
 }
 
 /// The records the running image's payload carries behind the marker. Only the first call walks the load commands.
-fn locate_records() -> Result<&'static [u8], super::Error> {
+fn locate_records() -> Result<&'static [u8], Error> {
 	// SAFETY: image 0 is the running executable, whose headers stay mapped for the life of the process.
 	let pointer = unsafe { _dyld_get_image_header(0) };
 	if pointer.is_null() {
-		return Err(super::Error::invalid(
-			"the running process has no Mach-O image 0",
-		));
+		return Err(Error::invalid("the running process has no Mach-O image 0"));
 	}
 	// SAFETY: dyld image headers contain the magic identifying their header layout.
 	let magic = unsafe { pointer.cast::<u32>().read() };
 	if magic != macho::MH_MAGIC_64 {
-		return Err(super::Error::invalid(
+		return Err(Error::invalid(
 			"the running image is not a 64-bit little-endian Mach-O",
 		));
 	}
@@ -157,7 +159,7 @@ fn locate_records() -> Result<&'static [u8], super::Error> {
 	let linkedit = linkedit.or_invalid("the running image has no __LINKEDIT segment")?;
 	// Packing always signs the image, so an unsigned one was never packed.
 	let signature = signature.ok_or_else(|| {
-		super::Error::not_found("the running image is not signed, so it carries no items")
+		Error::not_found("the running image is not signed, so it carries no items")
 	})? as usize;
 	let end = signature
 		.checked_sub(linkedit.fileoff.get(LittleEndian) as usize)
@@ -172,13 +174,13 @@ fn locate_records() -> Result<&'static [u8], super::Error> {
 	let start = payload
 		.chunks(ALIGN)
 		.position(|chunk| chunk.starts_with(MARKER))
-		.ok_or_else(|| super::Error::not_found("the running image carries no items"))?;
+		.ok_or_else(|| Error::not_found("the running image carries no items"))?;
 	Ok(&payload[start * ALIGN + MARKER.len()..])
 }
 
 /// The bytes stored under `name` in the running image.
-pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
-	static RECORDS: OnceLock<Result<&'static [u8], super::Error>> = OnceLock::new();
+pub(super) fn find(name: &str) -> Result<(Option<Cow<'static, str>>, &'static [u8]), Error> {
+	static RECORDS: OnceLock<Result<&'static [u8], Error>> = OnceLock::new();
 	let mut records = *RECORDS
 		.get_or_init(locate_records)
 		.as_ref()
@@ -198,14 +200,13 @@ pub(super) fn find(name: &str) -> Result<&'static [u8], super::Error> {
 		let Some((data, rest)) = body.split_at_checked(data_len) else {
 			break;
 		};
-		if stored_name == name.as_bytes() {
-			return Ok(data);
+		let stored = std::str::from_utf8(stored_name).ok();
+		if stored == Some(name) {
+			return Ok((stored.map(Cow::Borrowed), data));
 		}
 		records = rest;
 	}
-	Err(super::Error::not_found(
-		"the running image carries no such item",
-	))
+	Err(Error::not_found("the running image carries no such item"))
 }
 
 unsafe extern "C" {

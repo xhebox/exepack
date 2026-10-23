@@ -1,5 +1,10 @@
 # exepack
 
+[![Test](https://github.com/xhebox/exepack/actions/workflows/test.yml/badge.svg)](https://github.com/xhebox/exepack/actions/workflows/test.yml)
+[![crates.io](https://img.shields.io/crates/v/exepack.svg)](https://crates.io/crates/exepack)
+[![docs.rs](https://img.shields.io/docsrs/exepack)](https://docs.rs/exepack)
+[![License: MIT](https://img.shields.io/crates/l/exepack.svg)](https://github.com/xhebox/exepack/blob/main/LICENSE)
+
 Embed items into a single executable, with optional compression.
 
 ELF and Mach-O is highly inspired by [libsui](https://github.com/denoland/sui), PE based on [editpe](https://github.com/Systemcluster/editpe).
@@ -15,7 +20,7 @@ Prebuilt binaries come from the GitHub releases; `cargo install exepack` builds 
 ## Usage
 
 ```
-exepack --main <executable> --output <image> [--compress none|zstd|gzip[:LEVEL]|brotli[:LEVEL]] --item NAME=PATH [--item NAME=PATH ...]
+exepack --main <executable> --output <image> [--compress none|lz4|gzip[:LEVEL]|brotli[:LEVEL]] --item NAME=PATH [--item NAME=PATH ...]
 ```
 
 ```console
@@ -26,21 +31,23 @@ $ build/dist/myapp
 
 Repeat `--item` once per item; names must be unique.
 
-Compression defaults to `gzip`; `--compress none` embeds the original bytes. `gzip` takes a level in 0-9 (default 6) and `brotli` one in 0-11 (default 11), as in `--compress brotli:5`.
+Compression defaults to `lz4`; `--compress none` embeds the original bytes. `gzip` takes a level in 0-9 (default 6) and `brotli` one in 0-11 (default 11), as in `--compress brotli:5`.
 
-The output copies the permissions of `--main`, setuid and setgid included.
+The output copies the permissions of `--main`, setuid/setgid included. And also codesign/entitlements for Mach-O.
 
 ## Reading items back
 
 ```rust
-let mut kernel = exepack::find_loaded("test_item")?;
+let mut item = exepack::find_loaded("test_item")?;
 let mut bytes = Vec::new();
-kernel.read_to_end(&mut bytes)?;
+item.read_to_end(&mut bytes)?;
 ```
+
+`lz4`, `gzip` and `brotli` are Cargo features, all enabled by default, so a binary that only reads one format (or `none`) can disable the rest with `default-features = false`.
 
 An item packed with `--compress none` is mapped as it is, and `Item::as_bytes` hands its bytes over without a copy.
 
-A build that carries no such item, such as an unpacked one, fails with `ErrorKind::NotFound`, so it can fall back:
+A build that carries no such item, fails with `ErrorKind::NotFound`, so you can fallback:
 
 ```rust
 let item: Box<dyn std::io::Read> = match exepack::find_loaded("test_item") {
@@ -50,6 +57,9 @@ let item: Box<dyn std::io::Read> = match exepack::find_loaded("test_item") {
 };
 ```
 
-## License
+## Benchmarks
 
-MIT
+`task pack-time` and `task find-time` run the whole binary under
+[hyperfine](https://github.com/sharkdp/hyperfine) —the first packs, the second starts a process that looks an item up,
+packed and unpacked— and both report the memory it peaks at. The sizes each compression stores are pinned by a
+snapshot test.

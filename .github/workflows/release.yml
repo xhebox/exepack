@@ -69,7 +69,6 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
 
-  # After the GitHub release, so cargo binstall finds the tarballs once crates.io lists the version.
   crates-io:
     needs: release
     runs-on: ubuntu-26.04
